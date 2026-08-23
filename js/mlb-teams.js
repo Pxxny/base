@@ -1,0 +1,35 @@
+// ============================================================
+// MLB TEAMS (30)
+// ============================================================
+const MLB_TEAMS = [
+  { id: "NYY", name: "New York Yankees", city: "New York", stadium: "Yankee Stadium", league: "MLB", division: "AL East" },
+  { id: "BOS", name: "Boston Red Sox", city: "Boston", stadium: "Fenway Park", league: "MLB", division: "AL East" },
+  { id: "TOR", name: "Toronto Blue Jays", city: "Toronto", stadium: "Rogers Centre", league: "MLB", division: "AL East" },
+  { id: "TB", name: "Tampa Bay Rays", city: "St. Petersburg", stadium: "Tropicana Field", league: "MLB", division: "AL East" },
+  { id: "BAL", name: "Baltimore Orioles", city: "Baltimore", stadium: "Oriole Park at Camden Yards", league: "MLB", division: "AL East" },
+  { id: "CLE", name: "Cleveland Guardians", city: "Cleveland", stadium: "Progressive Field", league: "MLB", division: "AL Central" },
+  { id: "MIN", name: "Minnesota Twins", city: "Minneapolis", stadium: "Target Field", league: "MLB", division: "AL Central" },
+  { id: "CWS", name: "Chicago White Sox", city: "Chicago", stadium: "Guaranteed Rate Field", league: "MLB", division: "AL Central" },
+  { id: "DET", name: "Detroit Tigers", city: "Detroit", stadium: "Comerica Park", league: "MLB", division: "AL Central" },
+  { id: "KC", name: "Kansas City Royals", city: "Kansas City", stadium: "Kauffman Stadium", league: "MLB", division: "AL Central" },
+  { id: "HOU", name: "Houston Astros", city: "Houston", stadium: "Minute Maid Park", league: "MLB", division: "AL West" },
+  { id: "SEA", name: "Seattle Mariners", city: "Seattle", stadium: "T-Mobile Park", league: "MLB", division: "AL West" },
+  { id: "TEX", name: "Texas Rangers", city: "Arlington", stadium: "Globe Life Field", league: "MLB", division: "AL West" },
+  { id: "LAA", name: "Los Angeles Angels", city: "Anaheim", stadium: "Angel Stadium", league: "MLB", division: "AL West" },
+  { id: "OAK", name: "Athletics", city: "Sacramento", stadium: "Sutter Health Park", league: "MLB", division: "AL West" },
+  { id: "ATL", name: "Atlanta Braves", city: "Atlanta", stadium: "Truist Park", league: "MLB", division: "NL East" },
+  { id: "PHI", name: "Philadelphia Phillies", city: "Philadelphia", stadium: "Citizens Bank Park", league: "MLB", division: "NL East" },
+  { id: "NYM", name: "New York Mets", city: "New York", stadium: "Citi Field", league: "MLB", division: "NL East" },
+  { id: "MIA", name: "Miami Marlins", city: "Miami", stadium: "loanDepot Park", league: "MLB", division: "NL East" },
+  { id: "WSH", name: "Washington Nationals", city: "Washington", stadium: "Nationals Park", league: "MLB", division: "NL East" },
+  { id: "MIL", name: "Milwaukee Brewers", city: "Milwaukee", stadium: "American Family Field", league: "MLB", division: "NL Central" },
+  { id: "CHC", name: "Chicago Cubs", city: "Chicago", stadium: "Wrigley Field", league: "MLB", division: "NL Central" },
+  { id: "STL", name: "St. Louis Cardinals", city: "St. Louis", stadium: "Busch Stadium", league: "MLB", division: "NL Central" },
+  { id: "CIN", name: "Cincinnati Reds", city: "Cincinnati", stadium: "Great American Ball Park", league: "MLB", division: "NL Central" },
+  { id: "PIT", name: "Pittsburgh Pirates", city: "Pittsburgh", stadium: "PNC Park", league: "MLB", division: "NL Central" },
+  { id: "LAD", name: "Los Angeles Dodgers", city: "Los Angeles", stadium: "Dodger Stadium", league: "MLB", division: "NL West" },
+  { id: "SD", name: "San Diego Padres", city: "San Diego", stadium: "Petco Park", league: "MLB", division: "NL West" },
+  { id: "SF", name: "San Francisco Giants", city: "San Francisco", stadium: "Oracle Park", league: "MLB", division: "NL West" },
+  { id: "ARI", name: "Arizona Diamondbacks", city: "Phoenix", stadium: "Chase Field", league: "MLB", division: "NL West" },
+  { id: "COL", name: "Colorado Rockies", city: "Denver", stadium: "Coors Field", league: "MLB", division: "NL West" }
+];
