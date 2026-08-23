@@ -97,7 +97,7 @@ function simDay(state) {
   state.day++;
   // advance injuries
   for (const t of state.allTeams) for (const p of t.roster) advanceInjuryDays(p);
-  if (state.player) advanceInjuryDays(state.player);
+  if (state.player) { advanceInjuryDays(state.player); recoverFatigue(state.player); }
   return results;
 }
 
@@ -132,6 +132,6 @@ function simDayWithUserGame(state) {
   }
   state.day++;
   for (const t of state.allTeams) for (const p of t.roster) advanceInjuryDays(p);
-  if (state.player) advanceInjuryDays(state.player);
+  if (state.player) { advanceInjuryDays(state.player); recoverFatigue(state.player); }
   return { results, userGameResult };
 }

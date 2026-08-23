@@ -35,3 +35,14 @@ function maybeRandomInjury(p, chancePerGame = 0.004) {
   }
   return false;
 }
+
+// Daily fatigue recovery. Training pushes fatigue up (see career.js
+// trainPlayer) but nothing ever brought it back down, so it would sit at
+// 100/100 forever once maxed out. A day of rest/normal activity recovers
+// a modest amount; players who are hurt recover a bit faster since
+// they're not exerting themselves in games either way.
+function recoverFatigue(p, days = 1) {
+  if (typeof p.fatigue !== "number") { p.fatigue = 0; return; }
+  const perDay = p.health.status === "Injured" ? 10 : 6;
+  p.fatigue = clamp(p.fatigue - perDay * days, 0, 100);
+}

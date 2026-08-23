@@ -948,15 +948,27 @@ function checkPromotion() {
     const idx = MINOR_LEVELS.indexOf(p.level);
     if (ov > 55 + idx * 8 && Math.random() < 0.05) {
       const next = MINOR_LEVELS[idx + 1];
-      if (next) { p.level = next; addNews(STATE, `PROMOTED! ${p.name} moves up to ${next}.`); toast(`Promoted to ${next}!`); }
+      if (next) {
+        p.level = next;
+        // Re-sign at the new level's pay scale — a promotion without a new
+        // contract would leave a player earning Rookie-ball wages all the
+        // way up through Triple-A.
+        p.contract = generateContract(p, next, p.contract ? p.contract.years : 1);
+        addNews(STATE, `PROMOTED! ${p.name} moves up to ${next}.`);
+        toast(`Promoted to ${next}!`);
+      }
       else if (idx === MINOR_LEVELS.length - 1) {
         const org = ALL_PRO_TEAMS.find(t => t.id === p.orgId);
         p.level = org ? org.league : "MLB";
         p.teamId = p.orgId;
         const team = STATE.teams[p.teamId];
         if (team) team.roster.push(p);
-        addNews(STATE, `CALL-UP! ${p.name} has been called up to the big leagues with the ${TEAM_NAME(p.teamId)}!`);
-        toast(`${p.name} called up to ${p.level}!`);
+        // Call-up to the majors/NPB/KBO: sign a new pro contract at the
+        // big-league pay scale instead of leaving the old Minor League
+        // Contract in place.
+        p.contract = generateContract(p, p.level, 2);
+        addNews(STATE, `CALL-UP! ${p.name} has been called up to the big leagues with the ${TEAM_NAME(p.teamId)}! New contract: $${p.contract.salary}M/yr.`);
+        toast(`${p.name} called up to ${p.level}! Signed a new $${p.contract.salary}M/yr contract.`);
       }
     }
   }

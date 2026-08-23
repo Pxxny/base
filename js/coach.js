@@ -137,27 +137,45 @@ function assignFieldPositions(starters) {
 
 // Picks today's starting pitcher using the same coach-personality lens
 // (a Veteran-Favoring coach leans on established arms, a
-// Development-Focused one gives young arms starts, etc). Falls back to
-// the previous simple "best available in rotation" behavior when there's
-// no meaningful signal to differentiate by.
+// Development-Focused one gives young arms starts, etc). Every healthy
+// starter in the rotation gets scored (not just uniformly sampled from a
+// "top half" bucket) so a pitcher who is clearly the best on the staff
+// gets the ball far more often than a marginal back-of-rotation arm,
+// instead of being diluted into a coin-flip against everyone else in a
+// same-sized pool.
 function pickStartingPitcher(team) {
   const coach = getTeamCoach(team);
-  const sps = (team.roster || []).filter(p => p.position === "SP" && p.health.status === "Healthy")
-    .sort((a, b) => pitchingOverall(b) - pitchingOverall(a));
+  const sps = (team.roster || []).filter(p => p.position === "SP" && p.health.status === "Healthy");
   if (!sps.length) {
     const anyP = (team.roster || []).filter(p => isPitcher(p.position)).sort((a, b) => pitchingOverall(b) - pitchingOverall(a));
     return anyP.length ? anyP[0] : createPlayer({ position: "SP" });
   }
-  const pool = sps.slice(0, Math.max(1, Math.ceil(sps.length / 2)));
-  if (coach.personality === "Development-Focused") {
-    const withYouth = [...pool].sort((a, b) => (a.age - b.age) || (pitchingOverall(b) - pitchingOverall(a)));
-    return pick(withYouth.slice(0, Math.max(1, Math.ceil(withYouth.length / 2))));
+  if (sps.length === 1) return sps[0];
+
+  const scored = sps.map(p => {
+    let score = pitchingOverall(p) * 1.5; // dominant factor: raw talent
+    if (coach.personality === "Development-Focused") score += clamp((28 - p.age) * 2.5, -10, 20);
+    else if (coach.personality === "Veteran-Favoring") score += clamp((p.yearsPro || 0) * 2, 0, 16);
+    else if (coach.personality === "Hot Hand") score += recentForm(p) * 1.2;
+    if (p.isUser) score += userFormBonus(p) * 0.4;
+    return { player: p, score };
+  });
+
+  // Weighted pick where the weight scales with how far ABOVE the weakest
+  // arm in the pool a pitcher's score is, not just their rank - so a
+  // true ace with a huge score gap over the back of the rotation starts
+  // most games, while a tightly-bunched rotation still rotates fairly
+  // evenly between similar arms. A little noise keeps it from being a
+  // hard guarantee every single time.
+  const minScore = Math.min(...scored.map(s => s.score));
+  const weights = scored.map(s => Math.pow(1.09, (s.score - minScore) + rnd(-2, 2)));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  let roll = Math.random() * totalWeight;
+  for (let i = 0; i < scored.length; i++) {
+    roll -= weights[i];
+    if (roll <= 0) return scored[i].player;
   }
-  if (coach.personality === "Veteran-Favoring") {
-    const withVets = [...pool].sort((a, b) => (b.yearsPro - a.yearsPro) || (pitchingOverall(b) - pitchingOverall(a)));
-    return pick(withVets.slice(0, Math.max(1, Math.ceil(withVets.length / 2))));
-  }
-  return pick(pool);
+  return scored.sort((a, b) => b.score - a.score)[0].player;
 }
 
 // Bullpen arms available for in-game relief substitutions, best-first.
