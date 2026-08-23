@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diamond Legacy — Baseball Career Simulator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="ticker-wrap" id="ticker">
+  <div class="ticker-track" id="tickerTrack"></div>
+</div>
+
+<header class="topbar">
+  <div class="brand">DIAMOND<span class="dot">•</span>LEGACY <span class="sub">Career Simulator</span></div>
+  <div id="topRightInfo" style="font-family:var(--font-mono);font-size:12px;color:var(--chalk-dim);"></div>
+</header>
+
+<nav class="tabs" id="tabs"></nav>
+
+<main id="main"></main>
+
+<div id="toast-wrap"></div>
+
+<footer>Diamond Legacy — an original career simulation. All teams and leagues are fictionalized simulations for gameplay purposes.</footer>
+
+<!-- Data: static reference tables, loaded first -->
+<script src="data/mlb-teams.js"></script>
+<script src="data/npb-teams.js"></script>
+<script src="data/kbo-teams.js"></script>
+<script src="data/players.js"></script>
+<script src="data/stadiums.js"></script>
+
+<!-- Core models & systems, in dependency order -->
+<script src="js/leagues.js"></script>
+<script src="js/player.js"></script>
+<script src="js/teams.js"></script>
+<script src="js/injuries.js"></script>
+<script src="js/simulation.js"></script>
+<script src="js/statistics.js"></script>
+<script src="js/contracts.js"></script>
+<script src="js/news.js"></script>
+<script src="js/schedule.js"></script>
+<script src="js/career.js"></script>
+<script src="js/save.js"></script>
+
+<!-- App bootstrap: DOM helpers, router, and the initial render call.
+     Must load last since every other script above defines functions
+     this file calls, and it triggers renderAll() on load. -->
+<script src="js/game.js"></script>
+</body>
+</html>
