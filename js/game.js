@@ -14,6 +14,7 @@ let CREATION = { name: "", age: 17, nationality: "USA", position: "SS", battingH
 const TABS = [
   { id: "career", label: "CAREER" },
   { id: "roster", label: "ROSTER" },
+  { id: "coach", label: "COACH" },
   { id: "training", label: "TRAINING" },
   { id: "stats", label: "STATS" },
   { id: "standings", label: "STANDINGS" },

@@ -104,11 +104,23 @@ function newGameState() {
   };
 }
 
+// Minor levels are worse rosters the lower they go, roughly mirroring
+// LEAGUES[...].level * 15 + 15 used for MLB/NPB/KBO (level 5 -> 90).
+const MINOR_LEVEL_ROSTER_STRENGTH = {
+  "Triple-A": 65, "Double-A": 52, "High-A": 40, "Single-A": 30, "Rookie": 20
+};
+
 function initLeagueTeams(state) {
   const built = [];
   for (const t of ALL_PRO_TEAMS) {
     const team = initTeam(t);
     generateRosterForTeam(team, LEAGUES[t.league].level * 15 + 15);
+    state.teams[team.id] = team;
+    built.push(team);
+  }
+  for (const t of ALL_MINOR_TEAMS) {
+    const team = initTeam(t);
+    generateRosterForTeam(team, MINOR_LEVEL_ROSTER_STRENGTH[t.minorLevel]);
     state.teams[team.id] = team;
     built.push(team);
   }
@@ -157,12 +169,15 @@ function beginCareer(state, mode) {
       p.level = "College"; p.age = Math.max(p.age, 19); state.phase = "college-season";
       addNews(state, `${p.name} commits to college baseball, chasing a shot at the Draft.`);
       break;
-    case "Minors":
-      p.level = "Rookie"; p.age = Math.max(p.age, 18);
-      assignToMinorTeam(state, p, "Rookie");
+    case "Minors": {
+      p.age = Math.max(p.age, 18);
+      const startLevel = startingMinorLevelForOVR(p);
+      assignToMinorTeam(state, p, startLevel);
+      p.contract = generateContract(p, startLevel, 1);
       state.phase = "season";
-      addNews(state, `${p.name} signs on and reports to Rookie ball.`);
+      addNews(state, `${p.name} signs on and reports to ${startLevel} ball${startLevel !== "Rookie" ? " — scouts liked what they saw" : ""}.`);
       break;
+    }
     case "DraftPrep":
       p.level = "Draft Prospect"; state.phase = "draft-prep";
       addNews(state, `${p.name} enters the pre-Draft process as a top prospect to watch.`);
@@ -174,12 +189,39 @@ function beginCareer(state, mode) {
   }
 }
 
-function assignToMinorTeam(state, p, minorLevel) {
-  // Attach to a random org's farm system (not a full separate team object; tracked via parent org)
-  const org = pick(MLB_TEAMS);
-  p.teamId = org.id;
+// Where a new/drafted player reports to camp depends on how good they
+// already are: an elite prospect can skip straight to Double-A or
+// Triple-A instead of always grinding up from Rookie ball.
+function startingMinorLevelForOVR(p) {
+  const ov = overallRating(p);
+  if (ov >= 70) return "Triple-A";
+  if (ov >= 60) return "Double-A";
+  if (ov >= 50) return "High-A";
+  if (ov >= 40) return "Single-A";
+  return "Rookie";
+}
+
+function assignToMinorTeam(state, p, minorLevel, orgId = null) {
+  // Attach the player to a real minor-league affiliate roster (a full
+  // team with its own league/schedule/box scores), owned by an MLB org's
+  // farm system.
+  const org = orgId ? MLB_TEAMS.find(t => t.id === orgId) : pick(MLB_TEAMS);
+  const chosenOrg = org || pick(MLB_TEAMS);
+  p.orgId = chosenOrg.id;
   p.level = minorLevel;
-  p.orgId = org.id;
+  const teamId = affiliateTeamId(chosenOrg.id, minorLevel);
+  p.teamId = teamId;
+  const team = state.teams[teamId];
+  if (team && !team.roster.find(r => r.id === p.id)) team.roster.push(p);
+}
+
+// Removes the player from whatever roster they're currently on (used
+// when moving between minor-league levels or being called up), so they
+// don't linger on two rosters at once.
+function removeFromCurrentRoster(state, p) {
+  if (!p.teamId) return;
+  const team = state.teams[p.teamId];
+  if (team) team.roster = team.roster.filter(r => r.id !== p.id);
 }
 
 
@@ -416,9 +458,10 @@ function screenDraftPrep() {
       if (mine) {
         addNews(STATE, `DRAFTED! ${p.name} selected Round ${mine.round}, Pick ${mine.pick} by the ${TEAM_NAME(mine.team)}.`);
       } else {
-        addNews(STATE, `${p.name} went undrafted but signs a Minor League deal as a free agent.`);
-        p.teamId = pick(MLB_TEAMS).id; p.orgId = p.teamId; p.level = "Rookie";
-        p.contract = generateContract(p, "Rookie", 1);
+        const startLevel = startingMinorLevelForOVR(p);
+        addNews(STATE, `${p.name} went undrafted but signs a Minor League deal as a free agent, headed to ${startLevel} ball.`);
+        assignToMinorTeam(STATE, p, startLevel);
+        p.contract = generateContract(p, startLevel, 1);
       }
       renderAll();
     }
@@ -464,7 +507,14 @@ function screenDraftResults() {
   }
   wrap.appendChild(table);
   wrap.appendChild(el("div", { class: "btn-row" }, [
-    el("button", { class: "btn amber", onclick: () => { STATE.phase = "season"; ACTIVE_TAB = "career"; addNews(STATE, `${p.name} reports to ${p.level} ball with the ${TEAM_NAME(p.orgId)} organization.`); renderAll(); } }, "Report to Minor League Camp →")
+    el("button", { class: "btn amber", onclick: () => {
+      const startLevel = startingMinorLevelForOVR(p);
+      assignToMinorTeam(STATE, p, startLevel, p.orgId);
+      p.contract = generateContract(p, startLevel, 1);
+      STATE.phase = "season"; ACTIVE_TAB = "career";
+      addNews(STATE, `${p.name} reports to ${startLevel} ball with the ${TEAM_NAME(p.orgId)} organization.`);
+      renderAll();
+    } }, "Report to Minor League Camp →")
   ]));
   return wrap;
 }
@@ -524,6 +574,120 @@ function renderRosterView() {
 }
 
 
+// ---- Coach ----
+// Coach's trust in the user, expressed as a short read-out rather than
+// just the raw 0-100 number.
+function trustLabel(trust) {
+  if (trust >= 80) return "Excellent";
+  if (trust >= 65) return "Good";
+  if (trust >= 40) return "Neutral";
+  if (trust >= 20) return "Shaky";
+  return "Poor";
+}
+
+let COACH_LAST_REPLY = null; // { prompt, line, delta } — shown until the next visit
+
+function renderCoachView() {
+  const p = STATE.player;
+  const card = el("div", { class: "card" });
+  if (!p) { card.appendChild(el("h2", {}, "Coach")); card.appendChild(el("p", { class: "small-note" }, "No active player yet.")); return card; }
+  const team = STATE.teams[p.teamId];
+  if (!team) {
+    card.appendChild(el("h2", {}, "Coach"));
+    card.appendChild(el("p", { class: "small-note" }, "You don't have a team/coach right now."));
+    return card;
+  }
+  const coach = getTeamCoach(team);
+  const wrap = el("div");
+
+  card.appendChild(el("h2", {}, `Coach ${coach.name}`));
+  card.appendChild(el("p", { class: "small-note" }, `${team.name} — ${COACH_PERSONALITIES[coach.personality].desc}`));
+  const strip = el("div", { class: "stat-strip" });
+  strip.appendChild(statBox(coach.personality, "Style"));
+  strip.appendChild(statBox(trustLabel(coach.trustInUser), "Trust"));
+  strip.appendChild(statBox(String(coach.trustInUser), "Trust (0-100)"));
+  card.appendChild(strip);
+
+  if (COACH_LAST_REPLY) {
+    const box = el("div", { class: "card", style: "margin-top:12px;background:rgba(232,163,61,0.06);" });
+    box.appendChild(el("p", { class: "small-note" }, `You: "${COACH_LAST_REPLY.prompt}"`));
+    box.appendChild(el("p", {}, `${coach.name}: "${COACH_LAST_REPLY.line}"`));
+    card.appendChild(box);
+  }
+  wrap.appendChild(card);
+
+  // ---- Talk topics ----
+  const talkCard = el("div", { class: "card" });
+  talkCard.appendChild(el("h2", {}, "Talk to Your Coach"));
+  talkCard.appendChild(el("p", { class: "small-note" }, "Conversation nudges trust up or down immediately, based on how it goes."));
+  const talkGrid = el("div", { class: "option-grid" });
+  for (const topicKey of Object.keys(COACH_TALK_TOPICS)) {
+    talkGrid.appendChild(el("div", {
+      class: "option-card",
+      onclick: () => {
+        COACH_LAST_REPLY = talkToCoach(team, topicKey, p);
+        renderAll();
+      }
+    }, [el("h4", {}, topicKey), el("p", {}, COACH_TALK_TOPICS[topicKey].prompt)]));
+  }
+  talkCard.appendChild(talkGrid);
+  wrap.appendChild(talkCard);
+
+  // ---- Requests ----
+  const reqCard = el("div", { class: "card" });
+  reqCard.appendChild(el("h2", {}, "Make a Request"));
+  reqCard.appendChild(el("p", { class: "small-note" }, `Each request is limited to once every ${COACH_REQUEST_COOLDOWN_DAYS} days.`));
+  const reqRow = el("div", { class: "btn-row" });
+
+  const contractGate = canMakeCoachRequest(team, "contract", STATE.day + (STATE.year - 2026) * 365);
+  reqRow.appendChild(el("button", {
+    class: "btn secondary",
+    disabled: !contractGate.allowed,
+    onclick: () => {
+      const dayKey = STATE.day + (STATE.year - 2026) * 365;
+      const res = requestNewContract(STATE, team, p);
+      recordCoachRequest(team, "contract", dayKey);
+      COACH_LAST_REPLY = { prompt: "Can we talk about a new contract?", line: res.line };
+      toast(res.success ? "New contract signed!" : "Coach turned down the request.");
+      renderAll();
+    }
+  }, contractGate.allowed ? "Ask for New Contract" : `Ask for New Contract (${contractGate.daysLeft}d)`));
+
+  const demoteGate = canMakeCoachRequest(team, "demotion", STATE.day + (STATE.year - 2026) * 365);
+  reqRow.appendChild(el("button", {
+    class: "btn secondary",
+    disabled: !demoteGate.allowed || !MINOR_LEVELS.includes(p.level),
+    onclick: () => {
+      const dayKey = STATE.day + (STATE.year - 2026) * 365;
+      const res = requestDemotion(STATE, team, p);
+      recordCoachRequest(team, "demotion", dayKey);
+      COACH_LAST_REPLY = { prompt: "Send me down for more reps?", line: res.line };
+      toast(res.success ? "Sent down for more reps." : "Coach wants to keep you here.");
+      renderAll();
+    }
+  }, demoteGate.allowed ? "Ask to Drop a Level" : `Ask to Drop a Level (${demoteGate.daysLeft}d)`));
+
+  const promoteGate = canMakeCoachRequest(team, "promotion", STATE.day + (STATE.year - 2026) * 365);
+  reqRow.appendChild(el("button", {
+    class: "btn amber",
+    disabled: !promoteGate.allowed,
+    onclick: () => {
+      const dayKey = STATE.day + (STATE.year - 2026) * 365;
+      const res = requestPromotion(STATE, team, p);
+      recordCoachRequest(team, "promotion", dayKey);
+      COACH_LAST_REPLY = { prompt: "I'm ready for the next level — can I get a shot?", line: res.line };
+      toast(res.success ? "Promoted!" : "Coach says not yet.");
+      renderAll();
+    }
+  }, promoteGate.allowed ? "Ask to Move Up a Level" : `Ask to Move Up a Level (${promoteGate.daysLeft}d)`));
+
+  reqCard.appendChild(reqRow);
+  wrap.appendChild(reqCard);
+
+  return wrap;
+}
+
+
 // ---- Training ----
 function renderTrainingView() {
   const p = STATE.player;
@@ -548,22 +712,38 @@ function renderTrainingView() {
 
 
 // ---- Standings ----
+function standingsTable(teams) {
+  const sorted = [...teams].sort((a, b) => (b.wins - b.losses) - (a.wins - a.losses));
+  const table = el("table", { class: "stat-table" });
+  table.appendChild(el("tr", {}, ["Team", "W", "L", "PCT"].map(h => el("th", {}, h))));
+  for (const t of sorted) {
+    const pct = t.wins + t.losses > 0 ? t.wins / (t.wins + t.losses) : 0;
+    const isMine = STATE.player && (STATE.player.teamId === t.id);
+    table.appendChild(el("tr", { class: isMine ? "user-row" : "" }, [
+      el("td", {}, t.name), el("td", {}, String(t.wins)), el("td", {}, String(t.losses)), el("td", {}, fmt3(pct))
+    ]));
+  }
+  return table;
+}
+
 function renderStandingsView() {
   const wrap = el("div");
   for (const lg of ["MLB", "NPB", "KBO"]) {
     const card = el("div", { class: "card" });
     card.appendChild(el("h2", {}, lg + " Standings"));
-    const teams = STATE.allTeams.filter(t => t.league === lg).sort((a, b) => (b.wins - b.losses) - (a.wins - a.losses));
-    const table = el("table", { class: "stat-table" });
-    table.appendChild(el("tr", {}, ["Team", "W", "L", "PCT"].map(h => el("th", {}, h))));
-    for (const t of teams) {
-      const pct = t.wins + t.losses > 0 ? t.wins / (t.wins + t.losses) : 0;
-      const isMine = STATE.player && (STATE.player.teamId === t.id);
-      table.appendChild(el("tr", { class: isMine ? "user-row" : "" }, [
-        el("td", {}, t.name), el("td", {}, String(t.wins)), el("td", {}, String(t.losses)), el("td", {}, fmt3(pct))
-      ]));
-    }
-    card.appendChild(table);
+    card.appendChild(standingsTable(STATE.allTeams.filter(t => t.league === lg)));
+    wrap.appendChild(card);
+  }
+
+  // The user's own minor league (if they're in the minors) gets its own
+  // standings table so they can see where their affiliate stands within
+  // its actual league, rather than only the top-level pro leagues.
+  const p = STATE.player;
+  const myTeam = p ? STATE.teams[p.teamId] : null;
+  if (myTeam && myTeam.leagueGroup) {
+    const card = el("div", { class: "card" });
+    card.appendChild(el("h2", {}, `${myTeam.minorLevel} — ${myTeam.minorLeagueName} Standings`));
+    card.appendChild(standingsTable(STATE.allTeams.filter(t => t.leagueGroup === myTeam.leagueGroup)));
     wrap.appendChild(card);
   }
   return wrap;
@@ -589,6 +769,7 @@ function screenTab(tab) {
   if (tab === "gameday") { wrap.appendChild(renderGameDayView()); }
   else if (tab === "career") { wrap.appendChild(renderPlayerCard(STATE.player)); wrap.appendChild(renderSimControls()); wrap.appendChild(renderRecentLog()); wrap.appendChild(renderAttributeCard(STATE.player)); }
   else if (tab === "roster") wrap.appendChild(renderRosterView());
+  else if (tab === "coach") wrap.appendChild(renderCoachView());
   else if (tab === "training") wrap.appendChild(renderTrainingView());
   else if (tab === "stats") wrap.appendChild(renderStatsView());
   else if (tab === "standings") wrap.appendChild(renderStandingsView());
@@ -607,7 +788,11 @@ function renderPlayerCard(p) {
   info.appendChild(el("div", { class: "player-name" }, p.name));
   info.appendChild(el("div", { class: "player-meta" }, `${p.position} · Age ${p.age} · ${p.nationality} · Bats ${p.battingHand[0]} / Throws ${p.throwingHand[0]}`));
   const badges = el("div");
-  badges.appendChild(el("span", { class: "badge" }, `${p.level}${p.orgId ? " — " + TEAM_NAME(p.orgId) : ""}`));
+  const teamForBadge = STATE && STATE.teams ? STATE.teams[p.teamId] : null;
+  const levelBadge = teamForBadge && teamForBadge.minorLeagueName
+    ? `${p.level} (${teamForBadge.minorLeagueName}) — ${teamForBadge.name}`
+    : `${p.level}${p.orgId ? " — " + TEAM_NAME(p.orgId) : ""}`;
+  badges.appendChild(el("span", { class: "badge" }, levelBadge));
   badges.appendChild(el("span", { class: `badge ${p.health.status === "Healthy" ? "healthy" : "injured"}` }, p.health.status === "Healthy" ? "Healthy" : `${p.health.injury} (${p.health.daysOut}d)`));
   badges.appendChild(el("span", { class: "badge" }, p.personality));
   info.appendChild(badges);
@@ -674,7 +859,27 @@ function startGameDay() {
     revealedPAIndex: -1,    // index into game.pitchLog currently shown within the live half-inning
     finished: false
   };
+  notifyIfUserStarting(userGameResult);
   ACTIVE_TAB = "gameday";
+}
+
+// Tells the user right away whether they're in today's starting lineup
+// (as a batter) or on the mound as the starting pitcher, so a run of
+// bench days is obvious and doesn't just quietly happen off-screen.
+function notifyIfUserStarting(result) {
+  const p = STATE.player;
+  if (!p || !result) return;
+  const startingPitcher = result.homeStartingPitcher.id === p.id || result.awayStartingPitcher.id === p.id;
+  const inBattingOrder = [...result.homeLineup.order, ...result.awayLineup.order].some(o => o.player.id === p.id);
+  if (startingPitcher) {
+    toast(`You're starting on the mound today!`);
+    addNews(STATE, `${p.name} gets the ball as the starting pitcher today.`);
+  } else if (inBattingOrder) {
+    const slot = [...result.homeLineup.order, ...result.awayLineup.order].find(o => o.player.id === p.id);
+    toast(`You're in the starting lineup today — batting ${slot.battingOrder}, ${slot.position}.`);
+  } else if (!isPitcher(p.position)) {
+    toast(`You're not in today's starting lineup.`);
+  }
 }
 
 function renderGameDayView() {
@@ -949,16 +1154,18 @@ function checkPromotion() {
     if (ov > 55 + idx * 8 && Math.random() < 0.05) {
       const next = MINOR_LEVELS[idx + 1];
       if (next) {
-        p.level = next;
+        removeFromCurrentRoster(STATE, p);
+        assignToMinorTeam(STATE, p, next, p.orgId);
         // Re-sign at the new level's pay scale — a promotion without a new
         // contract would leave a player earning Rookie-ball wages all the
         // way up through Triple-A.
         p.contract = generateContract(p, next, p.contract ? p.contract.years : 1);
-        addNews(STATE, `PROMOTED! ${p.name} moves up to ${next}.`);
+        addNews(STATE, `PROMOTED! ${p.name} moves up to ${next} (${TEAM_NAME(p.teamId)}, ${STATE.teams[p.teamId].minorLeagueName}).`);
         toast(`Promoted to ${next}!`);
       }
       else if (idx === MINOR_LEVELS.length - 1) {
         const org = ALL_PRO_TEAMS.find(t => t.id === p.orgId);
+        removeFromCurrentRoster(STATE, p);
         p.level = org ? org.league : "MLB";
         p.teamId = p.orgId;
         const team = STATE.teams[p.teamId];

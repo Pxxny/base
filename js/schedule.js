@@ -76,11 +76,29 @@ function buildSeasonSchedule(state, leagueKey) {
   return schedule;
 }
 
-function simDay(state) {
-  // Simulate one day across all leagues: every team plays if scheduled
-  const results = [];
+// Groups this-day's matchups: MLB/NPB/KBO pair off within their league,
+// minor-league teams pair off within their own named league (leagueGroup)
+// so a Triple-A International League team never faces a Rookie-level
+// Dominican Rookie League team.
+function todaysMatchupGroups(state) {
+  const groups = [];
   for (const leagueKey of ["MLB", "NPB", "KBO"]) {
-    const teams = state.allTeams.filter(t => t.league === leagueKey);
+    groups.push(state.allTeams.filter(t => t.league === leagueKey));
+  }
+  const minorGroups = {};
+  for (const t of state.allTeams) {
+    if (t.league !== "MINORS") continue;
+    (minorGroups[t.leagueGroup] = minorGroups[t.leagueGroup] || []).push(t);
+  }
+  for (const key of Object.keys(minorGroups)) groups.push(minorGroups[key]);
+  return groups;
+}
+
+function simDay(state) {
+  // Simulate one day across all leagues (majors + every named minor
+  // league): every team plays if scheduled.
+  const results = [];
+  for (const teams of todaysMatchupGroups(state)) {
     const shuffled = [...teams].sort(() => Math.random() - 0.5);
     for (let i = 0; i < shuffled.length - 1; i += 2) {
       const home = shuffled[i], away = shuffled[i + 1];
@@ -114,8 +132,7 @@ function simDayWithUserGame(state) {
   let userGameResult = null;
   const userTeamId = state.player ? (state.player.teamId || state.player.orgId) : null;
 
-  for (const leagueKey of ["MLB", "NPB", "KBO"]) {
-    const teams = state.allTeams.filter(t => t.league === leagueKey);
+  for (const teams of todaysMatchupGroups(state)) {
     const shuffled = [...teams].sort(() => Math.random() - 0.5);
     for (let i = 0; i < shuffled.length - 1; i += 2) {
       const home = shuffled[i], away = shuffled[i + 1];
