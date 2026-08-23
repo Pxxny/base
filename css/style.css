@@ -249,3 +249,18 @@ footer { text-align: center; padding: 20px; color: var(--chalk-dim); font-family
   padding: 10px 14px; border-radius: 6px; font-size: 13px; max-width: 320px;
   box-shadow: 0 4px 14px rgba(0,0,0,0.4);
 }
+
+/* Live Game Day field diagram */
+.field-diagram-wrap {
+  display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+  margin-top: 16px; padding: 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.field-diagram { width: 180px; height: 180px; flex-shrink: 0; }
+.field-diamond { fill: #1c3626; stroke: var(--line); stroke-width: 2; }
+.base { fill: var(--navy); stroke: var(--chalk-dim); stroke-width: 1.5; }
+.base.occupied { fill: var(--amber); stroke: var(--amber); }
+.base.home { fill: var(--chalk); stroke: var(--chalk-dim); }
+.mound { fill: #2a4636; stroke: var(--line); stroke-width: 1; }
+.field-info { display: flex; flex-direction: column; gap: 6px; min-width: 160px; }
+.field-info-row { display: flex; justify-content: space-between; gap: 10px; font-family: var(--font-mono); font-size: 12.5px; }
+.field-info-lbl { color: var(--chalk-dim); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.5px; }
