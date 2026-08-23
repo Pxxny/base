@@ -86,6 +86,7 @@ function simDay(state) {
       const home = shuffled[i], away = shuffled[i + 1];
       const result = simulateGame(home, away, { recordLog: false });
       commitGameStats(result);
+      trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
       // random injuries for participants
@@ -121,6 +122,7 @@ function simDayWithUserGame(state) {
       const isUserGame = userTeamId && (home.id === userTeamId || away.id === userTeamId);
       const result = simulateGame(home, away, { recordLog: isUserGame });
       commitGameStats(result);
+      trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
       for (const line of result.game.lines.values()) maybeRandomInjury(line.player);

@@ -647,11 +647,14 @@ function renderSimControls() {
   return card;
 }
 
-// ---- Game Day (inning-by-inning viewer) ----
+// ---- Game Day (starting lineup -> live inning-by-inning -> final lineup) ----
 // GAME_VIEW holds the transient state of "today's" tracked game so the
-// player can step through it half-inning by half-inning, or jump straight
-// to the final result ("Sim"). Lives only in memory - it never needs to
-// be saved, since by the time you save/reload the day has already advanced.
+// player can review both starting lineups, step through the game
+// half-inning by half-inning (or jump straight to the final result), and
+// see the final lineup with every substitution that happened along the
+// way. Lives only in memory - it never needs to be saved, since by the
+// time you save/reload the day has already advanced.
+// stage: "lineups" -> "live" -> "final"
 let GAME_VIEW = null;
 
 function startGameDay() {
@@ -666,7 +669,9 @@ function startGameDay() {
   }
   GAME_VIEW = {
     result: userGameResult,
+    stage: "lineups",
     revealedHalfInnings: 0, // how many entries of game.log are currently shown
+    revealedPAIndex: -1,    // index into game.pitchLog currently shown within the live half-inning
     finished: false
   };
   ACTIVE_TAB = "gameday";
@@ -682,13 +687,62 @@ function renderGameDayView() {
     ]));
     return wrap;
   }
+  if (gv.stage === "lineups") wrap.appendChild(renderStartingLineupsCard(gv));
+  else if (gv.stage === "live") wrap.appendChild(renderLiveGameCard(gv));
+  else wrap.appendChild(renderFinalLineupsCard(gv));
+  return wrap;
+}
+
+// ---- Stage 1: Starting Lineups ----
+function renderStartingLineupsCard(gv) {
+  const { result } = gv;
+  const card = el("div", { class: "card" });
+  card.appendChild(el("h2", {}, `${result.awayTeam.name} @ ${result.homeTeam.name}`));
+  card.appendChild(el("p", { class: "small-note" }, `${TEAM_NAME(result.homeTeam.id)} — ${stadiumCapacity((result.homeTeam.stadium || ""))} capacity · Starting lineups below.`));
+
+  const grid = el("div", { class: "grid-2" });
+  grid.appendChild(lineupColumn(result.awayTeam, result.awayLineup, result.awayStartingPitcher, STATE.player));
+  grid.appendChild(lineupColumn(result.homeTeam, result.homeLineup, result.homeStartingPitcher, STATE.player));
+  card.appendChild(grid);
+
+  const btnRow = el("div", { class: "btn-row" });
+  btnRow.appendChild(el("button", {
+    class: "btn amber",
+    onclick: () => { GAME_VIEW.stage = "live"; renderAll(); }
+  }, "Play Ball →"));
+  card.appendChild(btnRow);
+  return card;
+}
+
+function lineupColumn(team, lineupInfo, startingPitcher, userPlayer) {
+  const box = el("div");
+  box.appendChild(el("h3", {}, team.name));
+  box.appendChild(el("p", { class: "small-note" }, `Manager: ${lineupInfo.coach.name} — ${lineupInfo.coach.personality} (${COACH_PERSONALITIES[lineupInfo.coach.personality].desc})`));
+  const table = el("table", { class: "stat-table" });
+  table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
+  for (const slot of lineupInfo.order) {
+    const isUser = userPlayer && slot.player.id === userPlayer.id;
+    table.appendChild(el("tr", { style: isUser ? "color:var(--amber);font-weight:700;" : "" }, [
+      el("td", {}, String(slot.battingOrder)),
+      el("td", {}, slot.position),
+      el("td", {}, slot.player.name + (isUser ? " (You)" : "")),
+      el("td", {}, String(battingOverall(slot.player)))
+    ]));
+  }
+  box.appendChild(table);
+  const isUserPitching = userPlayer && startingPitcher.id === userPlayer.id;
+  box.appendChild(el("p", { class: "small-note", style: isUserPitching ? "color:var(--amber);font-weight:700;" : "" }, `Starting Pitcher: ${startingPitcher.name}${isUserPitching ? " (You)" : ""} — OVR ${pitchingOverall(startingPitcher)}`));
+  return box;
+}
+
+// ---- Stage 2: Live field view ----
+function renderLiveGameCard(gv) {
   const { result } = gv;
   const p = STATE.player;
-  const isHome = p && (p.teamId === result.homeTeam.id || p.orgId === result.homeTeam.id);
   const log = result.game.log || [];
   const totalHalves = log.length;
   gv.revealedHalfInnings = Math.min(gv.revealedHalfInnings, totalHalves);
-  if (gv.revealedHalfInnings >= totalHalves) gv.finished = true;
+  if (gv.revealedHalfInnings >= totalHalves) { gv.finished = true; }
 
   const card = el("div", { class: "card" });
   card.appendChild(el("h2", {}, `${result.awayTeam.name} @ ${result.homeTeam.name}`));
@@ -701,11 +755,28 @@ function renderGameDayView() {
     statBox(result.homeTeam.name.split(" ").pop(), shownScore.home)
   ]));
 
+  // Live field snapshot: the current (or most recently revealed) half-inning's
+  // last plate appearance - current batter/pitcher, count, pitch, bases.
+  if (!gv.finished && gv.revealedHalfInnings < totalHalves) {
+    const currentHalf = log[gv.revealedHalfInnings];
+    const halfPAs = (result.game.pitchLog || []).filter(x => x.inning === currentHalf.inning && x.half === currentHalf.half);
+    const lastPA = halfPAs[halfPAs.length - 1];
+    card.appendChild(renderFieldDiagram(currentHalf, lastPA, result));
+  }
+
+  // Mid-game substitutions that happened during revealed innings so far.
+  const subsSoFar = (result.game.subs || []).filter(s => {
+    const idx = log.findIndex(h => h.inning === s.inning && h.half === s.half);
+    return idx >= 0 && idx < gv.revealedHalfInnings;
+  });
+
   const boardWrap = el("div", { style: "margin-top:14px;" });
   for (let i = 0; i < gv.revealedHalfInnings; i++) {
     const half = log[i];
     const inningCard = el("div", { style: "margin-bottom:10px;" });
     inningCard.appendChild(el("h3", {}, `${half.half === "top" ? "Top" : "Bottom"} ${half.inning}${half.runsThisHalf > 0 ? ` — ${half.runsThisHalf} run${half.runsThisHalf > 1 ? "s" : ""}` : ""}`));
+    const subsThisHalf = (result.game.subs || []).filter(s => s.inning === half.inning && s.half === half.half);
+    for (const sub of subsThisHalf) inningCard.appendChild(el("div", { class: "log-line", style: "color:var(--amber);" }, sub.description));
     if (half.plays.length) {
       for (const line of half.plays) inningCard.appendChild(el("div", { class: "log-line" }, line));
     } else {
@@ -730,12 +801,139 @@ function renderGameDayView() {
     card.appendChild(el("p", { class: "small-note", style: "margin-top:10px;" }, `Final: ${result.awayTeam.name} ${result.awayScore} — ${result.homeTeam.name} ${result.homeScore}. ${winnerName} win.`));
     btnRow.appendChild(el("button", {
       class: "btn amber",
-      onclick: () => { GAME_VIEW = null; ACTIVE_TAB = "career"; renderAll(); }
-    }, "Back to Career"));
+      onclick: () => { GAME_VIEW.stage = "final"; renderAll(); }
+    }, "View Final Lineups →"));
   }
   card.appendChild(btnRow);
-  wrap.appendChild(card);
-  return wrap;
+  return card;
+}
+
+// Renders an SVG diamond with runners on base, plus current batter/pitcher,
+// the ball-strike count, and the last-pitch speed/type.
+function renderFieldDiagram(currentHalf, lastPA, result) {
+  const box = el("div", { class: "field-diagram-wrap" });
+  const bases = lastPA ? lastPA.basesAfter : [null, null, null];
+  const outs = lastPA ? lastPA.outsAfter : 0;
+  const battingTeam = currentHalf.half === "top" ? result.awayTeam : result.homeTeam;
+  const pitchingTeam = currentHalf.half === "top" ? result.homeTeam : result.awayTeam;
+  const p = STATE.player;
+
+  // SVG diamond: home at bottom, 1B right, 2B top, 3B left.
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 200 200");
+  svg.setAttribute("class", "field-diagram");
+  const diamondPts = "100,40 160,100 100,160 40,100";
+  const diamond = document.createElementNS(NS, "polygon");
+  diamond.setAttribute("points", diamondPts);
+  diamond.setAttribute("class", "field-diamond");
+  svg.appendChild(diamond);
+  const baseCoords = { 1: [160, 100], 2: [100, 40], 3: [40, 100] }; // 1B, 2B, 3B
+  for (const [num, [cx, cy]] of Object.entries(baseCoords)) {
+    const occupied = bases[Number(num) - 1];
+    const rect = document.createElementNS(NS, "rect");
+    rect.setAttribute("x", cx - 8); rect.setAttribute("y", cy - 8);
+    rect.setAttribute("width", 16); rect.setAttribute("height", 16);
+    rect.setAttribute("transform", `rotate(45 ${cx} ${cy})`);
+    rect.setAttribute("class", occupied ? "base occupied" : "base");
+    svg.appendChild(rect);
+  }
+  const home = document.createElementNS(NS, "rect");
+  home.setAttribute("x", 92); home.setAttribute("y", 152); home.setAttribute("width", 16); home.setAttribute("height", 16);
+  home.setAttribute("transform", "rotate(45 100 160)");
+  home.setAttribute("class", "base home");
+  svg.appendChild(home);
+  const mound = document.createElementNS(NS, "circle");
+  mound.setAttribute("cx", 100); mound.setAttribute("cy", 108); mound.setAttribute("r", 6);
+  mound.setAttribute("class", "mound");
+  svg.appendChild(mound);
+  box.appendChild(svg);
+
+  const info = el("div", { class: "field-info" });
+  const battingLabel = lastPA ? lastPA.batter.name : "—";
+  const pitchingLabel = lastPA ? lastPA.pitcher.name : "—";
+  const isBatterUser = p && lastPA && lastPA.batter.id === p.id;
+  const isPitcherUser = p && lastPA && lastPA.pitcher.id === p.id;
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "At Bat"),
+    el("span", { style: isBatterUser ? "color:var(--amber);font-weight:700;" : "" }, battingLabel + (isBatterUser ? " (You)" : ""))
+  ]));
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "Pitching"),
+    el("span", { style: isPitcherUser ? "color:var(--amber);font-weight:700;" : "" }, pitchingLabel + (isPitcherUser ? " (You)" : ""))
+  ]));
+  const lastPitch = lastPA && lastPA.pitches && lastPA.pitches.length ? lastPA.pitches[lastPA.pitches.length - 1] : null;
+  if (lastPitch) {
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Count"),
+      el("span", {}, `${lastPitch.balls}-${lastPitch.strikes}`)
+    ]));
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Last Pitch"),
+      el("span", {}, `${lastPitch.type}, ${lastPitch.mph} mph`)
+    ]));
+  }
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "Outs"),
+    el("span", {}, String(outs))
+  ]));
+  box.appendChild(info);
+  return box;
+}
+
+// ---- Stage 3: Final Lineups (with every substitution that happened) ----
+function renderFinalLineupsCard(gv) {
+  const { result } = gv;
+  const card = el("div", { class: "card" });
+  card.appendChild(el("h2", {}, "Final Lineups"));
+  card.appendChild(el("p", { class: "small-note" }, `Final: ${result.awayTeam.name} ${result.awayScore} — ${result.homeTeam.name} ${result.homeScore}. ${result.winner.name} win.`));
+
+  const grid = el("div", { class: "grid-2" });
+  grid.appendChild(finalLineupColumn(result.awayTeam, result.awayLineup, result.awayStartingPitcher, result.game.subs.filter(s => s.team === "away"), STATE.player));
+  grid.appendChild(finalLineupColumn(result.homeTeam, result.homeLineup, result.homeStartingPitcher, result.game.subs.filter(s => s.team === "home"), STATE.player));
+  card.appendChild(grid);
+
+  const btnRow = el("div", { class: "btn-row" });
+  btnRow.appendChild(el("button", {
+    class: "btn amber",
+    onclick: () => { GAME_VIEW = null; ACTIVE_TAB = "career"; renderAll(); }
+  }, "Back to Career"));
+  card.appendChild(btnRow);
+  return card;
+}
+
+function finalLineupColumn(team, lineupInfo, startingPitcher, subs, userPlayer) {
+  const box = el("div");
+  box.appendChild(el("h3", {}, team.name));
+  const table = el("table", { class: "stat-table" });
+  table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
+  const battingSubs = subs.filter(s => s.kind === "batting");
+  for (const slot of lineupInfo.order) {
+    const replacedBy = battingSubs.find(s => s.outPlayer.id === slot.player.id);
+    const finalPlayer = replacedBy ? replacedBy.inPlayer : slot.player;
+    const isUser = userPlayer && finalPlayer.id === userPlayer.id;
+    table.appendChild(el("tr", { style: isUser ? "color:var(--amber);font-weight:700;" : "" }, [
+      el("td", {}, String(slot.battingOrder)),
+      el("td", {}, slot.position),
+      el("td", {}, finalPlayer.name + (isUser ? " (You)" : "") + (replacedBy ? ` (for ${slot.player.name})` : "")),
+      el("td", {}, String(battingOverall(finalPlayer)))
+    ]));
+  }
+  box.appendChild(table);
+
+  const pitchingSubs = subs.filter(s => s.kind === "pitching");
+  const finalPitcher = pitchingSubs.length ? pitchingSubs[pitchingSubs.length - 1].inPlayer : startingPitcher;
+  const isUserPitching = userPlayer && finalPitcher.id === userPlayer.id;
+  box.appendChild(el("p", { class: "small-note" }, `Starting Pitcher: ${startingPitcher.name} — OVR ${pitchingOverall(startingPitcher)}`));
+  if (pitchingSubs.length) {
+    box.appendChild(el("p", { class: "small-note", style: isUserPitching ? "color:var(--amber);font-weight:700;" : "" }, `Finished on the mound: ${finalPitcher.name}${isUserPitching ? " (You)" : ""} — OVR ${pitchingOverall(finalPitcher)}`));
+  }
+  if (subs.length) {
+    const subList = el("div", { style: "margin-top:6px;" });
+    for (const s of subs) subList.appendChild(el("div", { class: "log-line" }, `${s.half === "top" ? "Top" : "Bot"} ${s.inning}: ${s.description}`));
+    box.appendChild(subList);
+  }
+  return box;
 }
 
 function summarizeResults(results) {
