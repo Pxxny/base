@@ -60,6 +60,7 @@ function createPlayer({ name, age, nationality, position, isUser = false, levelH
     draftInfo: null,
     fatigue: 0,
     trainingFocus: null,
+    lastStartDay: null, // STATE.day this pitcher last started (rotation rest tracking)
     developmentTrend: rnd(-2, 3) // slight per-player variance in growth rate
   };
   return player;

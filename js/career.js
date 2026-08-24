@@ -888,15 +888,119 @@ function screenTeamSelect() {
 
 
 // ---- Roster ----
+// Defensive slots in a sensible display order, plus the pitching roles.
+// Used both for the "Position Leaders" strip and for filling out a
+// predicted lineup.
+const ROSTER_POSITION_ORDER = ["C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH", "SP", "RP", "CP"];
+
+// Best player at each position on the roster (the team's "core" at that
+// spot) — highest overall rating, healthy players preferred over injured
+// ones when both exist at a position. Positions nobody currently plays
+// are simply omitted.
+function positionLeaders(roster) {
+  const leaders = [];
+  for (const slot of ROSTER_POSITION_ORDER) {
+    const atSlot = roster.filter(pl => pl.position === slot);
+    if (!atSlot.length) continue;
+    atSlot.sort((a, b) => {
+      const aHealthy = a.health.status === "Healthy", bHealthy = b.health.status === "Healthy";
+      if (aHealthy !== bHealthy) return aHealthy ? -1 : 1;
+      return overallRating(b) - overallRating(a);
+    });
+    leaders.push({ slot, player: atSlot[0] });
+  }
+  return leaders;
+}
+
+// Non-mutating preview of who would start on the mound next game. Mirrors
+// pickStartingPitcher()'s rest rule and scoring, but never writes
+// lastStartDay or otherwise touches team state — this is a projection for
+// display, not an actual rotation decision, so looking at the Roster tab
+// repeatedly must never burn a pitcher's turn.
+function previewStartingPitcher(team) {
+  const coach = getTeamCoach(team);
+  const today = (typeof STATE !== "undefined" && STATE) ? STATE.day : null;
+  const allSps = (team.roster || []).filter(pl => pl.position === "SP" && pl.health.status === "Healthy");
+  const daysSinceStart = (pl) => (today == null || typeof pl.lastStartDay !== "number") ? Infinity : today - pl.lastStartDay;
+  let sps = allSps.filter(pl => daysSinceStart(pl) >= REST_DAYS_MIN);
+  if (!sps.length) sps = [...allSps].sort((a, b) => daysSinceStart(b) - daysSinceStart(a));
+  if (!sps.length) {
+    const anyP = (team.roster || []).filter(pl => isPitcher(pl.position)).sort((a, b) => pitchingOverall(b) - pitchingOverall(a));
+    return anyP.length ? anyP[0] : null;
+  }
+  if (sps.length === 1) return sps[0];
+  // Same scoring shape as pickStartingPitcher, but report the top-scored
+  // arm directly rather than doing a weighted random roll — a prediction
+  // should show the most likely starter, not sample one possible outcome.
+  const scored = sps.map(pl => {
+    let score = pitchingOverall(pl) * 1.5;
+    if (coach.personality === "Development-Focused") score += clamp((28 - pl.age) * 2.5, -10, 20);
+    else if (coach.personality === "Veteran-Favoring") score += clamp((pl.yearsPro || 0) * 2, 0, 16);
+    else if (coach.personality === "Hot Hand") score += recentForm(pl) * 1.2;
+    if (pl.isUser) score += userFormBonus(pl) * 0.4 + userTrustBonus(team);
+    return { player: pl, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].player;
+}
+
 function renderRosterView() {
   const p = STATE.player;
   const card = el("div", { class: "card" });
   const team = STATE.teams[p.teamId] || STATE.teams[p.orgId];
   card.appendChild(el("h2", {}, `Roster — ${team ? team.name : p.level}`));
-  const table = el("table", { class: "stat-table" });
-  table.appendChild(el("tr", {}, ["Name", "Pos", "Age", "OVR", "Status"].map(h => el("th", {}, h))));
+
   const roster = team ? [...team.roster] : [p];
   if (team && !roster.find(r => r.id === p.id) && p.teamId === team.id) roster.push(p);
+
+  // ---- Position Leaders: the team's core starter at each position ----
+  if (team) {
+    card.appendChild(el("h3", {}, "Position Leaders"));
+    card.appendChild(el("p", { class: "small-note" }, "The top player currently rostered at each position."));
+    const leaderGrid = el("div", { class: "option-grid" });
+    for (const { slot, player: leader } of positionLeaders(roster)) {
+      const isMe = leader.id === p.id;
+      leaderGrid.appendChild(el("div", { class: "option-card" }, [
+        el("h4", {}, slot),
+        el("p", {}, leader.name + (isMe ? " (YOU)" : "")),
+        el("p", { class: "small-note" }, `OVR ${overallRating(leader)} · ${leader.health.status}`)
+      ]));
+    }
+    card.appendChild(leaderGrid);
+  }
+
+  // ---- Predicted lineup for the next game ----
+  if (team) {
+    card.appendChild(el("h3", { style: "margin-top:18px;" }, "Predicted Lineup — Next Game"));
+    card.appendChild(el("p", { class: "small-note" }, "Projected batting order and starting pitcher if the game were played today. The coach's actual call on the day can still shift with health, rest, and form."));
+
+    const previewPitcher = previewStartingPitcher(team);
+    if (previewPitcher) {
+      const pitcherRow = el("div", { class: "stat-strip" });
+      pitcherRow.appendChild(statBox("Starting Pitcher", previewPitcher.name + (previewPitcher.id === p.id ? " (YOU)" : "")));
+      pitcherRow.appendChild(statBox("Pitcher OVR", String(pitchingOverall(previewPitcher))));
+      card.appendChild(pitcherRow);
+    }
+
+    const lineupInfo = buildLineup(team);
+    const lineupTable = el("table", { class: "stat-table" });
+    lineupTable.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
+    for (const slotEntry of lineupInfo.order) {
+      const isMe = slotEntry.player.id === p.id;
+      lineupTable.appendChild(el("tr", { class: isMe ? "user-row" : "" }, [
+        el("td", {}, String(slotEntry.battingOrder)),
+        el("td", {}, slotEntry.position),
+        el("td", {}, slotEntry.player.name + (isMe ? " (YOU)" : "")),
+        el("td", {}, String(battingOverall(slotEntry.player)))
+      ]));
+    }
+    card.appendChild(lineupTable);
+  }
+
+  // ---- Full roster ----
+  card.appendChild(el("h3", { style: "margin-top:18px;" }, "Full Roster"));
+  const table = el("table", { class: "stat-table" });
+  table.appendChild(el("tr", {}, ["Name", "Pos", "Age", "OVR", "Status"].map(h => el("th", {}, h))));
   roster.sort((a, b) => overallRating(b) - overallRating(a));
   for (const pl of roster.slice(0, 40)) {
     const isMe = pl.id === p.id;
@@ -1206,8 +1310,10 @@ function startGameDay() {
   GAME_VIEW = {
     result: userGameResult,
     stage: "lineups",
-    revealedHalfInnings: 0, // how many entries of game.log are currently shown
-    revealedPAIndex: -1,    // index into game.pitchLog currently shown within the live half-inning
+    revealedHalfInnings: 0, // how many FULL half-innings from game.log are already locked in on the board
+    paIndex: 0,             // index into game.pitchLog of the plate appearance currently being played out live
+    pitchIndex: 0,          // how many pitches of the CURRENT PA have been thrown so far
+    animPhase: null,        // null | "pitching" | "swinging" | "outcome" — drives the live animation frame
     finished: false
   };
   notifyIfUserStarting(userGameResult);
@@ -1291,43 +1397,84 @@ function lineupColumn(team, lineupInfo, startingPitcher, userPlayer) {
   return box;
 }
 
-// ---- Stage 2: Live field view ----
+// Renders a classic line-score table: away/home team names down the side,
+// innings 1-9 (or more, for extras) across the top, plus R/H/E totals.
+// `revealedHalves` optionally caps it to only the half-innings played so
+// far (for the live view, so it doesn't spoil unplayed innings); omit it
+// to show the full completed game (final view).
+function renderLineScoreTable(result, revealedHalves) {
+  const log = revealedHalves != null ? result.game.log.slice(0, revealedHalves) : result.game.log;
+  const partialGame = { ...result.game, log };
+  const ls = buildLineScore(partialGame);
+  const table = el("table", { class: "stat-table linescore" });
+  const headRow = el("tr", {}, [
+    el("th", {}, ""),
+    ...ls.innings.map(n => el("th", {}, String(n))),
+    el("th", {}, "R"), el("th", {}, "H"), el("th", {}, "E")
+  ]);
+  table.appendChild(headRow);
+  const rowFor = (label, side) => el("tr", {}, [
+    el("td", { style: "text-align:left;font-weight:600;" }, label),
+    ...side.byInning.map(v => el("td", {}, v == null ? "" : String(v))),
+    el("td", { style: "font-weight:700;" }, String(side.R)),
+    el("td", {}, String(side.H)),
+    el("td", {}, String(side.E))
+  ]);
+  table.appendChild(rowFor(result.awayTeam.name.split(" ").pop(), ls.away));
+  table.appendChild(rowFor(result.homeTeam.name.split(" ").pop(), ls.home));
+  return table;
+}
+
+// ---- Stage 2: Live field view (pitch-by-pitch) ----
+// Plays the game one pitch at a time instead of one half-inning at a time.
+// gv.paIndex walks through result.game.pitchLog (one entry per plate
+// appearance, each already holding its full pitch sequence). gv.pitchIndex
+// tracks how many of the CURRENT PA's pitches have been thrown. Once a PA's
+// pitches are exhausted, "Next Pitch" reveals that PA's outcome and (if it
+// closed out the half-inning) locks the half-inning into the log board below,
+// mirroring exactly what the old half-inning-at-a-time view showed, just
+// arrived at one pitch at a time.
 function renderLiveGameCard(gv) {
   const { result } = gv;
-  const p = STATE.player;
   const log = result.game.log || [];
+  const pitchLog = result.game.pitchLog || [];
   const totalHalves = log.length;
-  gv.revealedHalfInnings = Math.min(gv.revealedHalfInnings, totalHalves);
-  if (gv.revealedHalfInnings >= totalHalves) { gv.finished = true; }
+  const totalPAs = pitchLog.length;
+  gv.paIndex = Math.min(gv.paIndex, totalPAs);
+  if (gv.paIndex >= totalPAs) { gv.finished = true; }
 
   const card = el("div", { class: "card" });
   card.appendChild(el("h2", {}, `${result.awayTeam.name} @ ${result.homeTeam.name}`));
 
-  const shownScore = gv.revealedHalfInnings > 0
-    ? log[gv.revealedHalfInnings - 1].scoreAfter
-    : { home: 0, away: 0 };
+  // How many half-innings are FULLY complete given how many PAs we've played
+  // through live (used to decide what's locked into the log board vs. still
+  // "in progress" in the field diagram above it).
+  const currentPA = !gv.finished ? pitchLog[gv.paIndex] : null;
+  let revealedHalfInnings = 0;
+  if (currentPA) {
+    revealedHalfInnings = log.findIndex(h => h.inning === currentPA.inning && h.half === currentPA.half);
+    if (revealedHalfInnings < 0) revealedHalfInnings = totalHalves;
+  } else {
+    revealedHalfInnings = totalHalves;
+  }
+  gv.revealedHalfInnings = revealedHalfInnings;
+
+  const lastCompletedPA = gv.paIndex > 0 ? pitchLog[gv.paIndex - 1] : null;
+  const shownScore = lastCompletedPA ? lastCompletedPA.scoreAfter : { home: 0, away: 0 };
   card.appendChild(el("div", { class: "stat-strip" }, [
     statBox(result.awayTeam.name.split(" ").pop(), shownScore.away),
     statBox(result.homeTeam.name.split(" ").pop(), shownScore.home)
   ]));
+  card.appendChild(renderLineScoreTable(result, revealedHalfInnings));
 
-  // Live field snapshot: the current (or most recently revealed) half-inning's
-  // last plate appearance - current batter/pitcher, count, pitch, bases.
-  if (!gv.finished && gv.revealedHalfInnings < totalHalves) {
-    const currentHalf = log[gv.revealedHalfInnings];
-    const halfPAs = (result.game.pitchLog || []).filter(x => x.inning === currentHalf.inning && x.half === currentHalf.half);
-    const lastPA = halfPAs[halfPAs.length - 1];
-    card.appendChild(renderFieldDiagram(currentHalf, lastPA, result));
+  // Live field snapshot: the plate appearance currently being played out.
+  if (!gv.finished && currentPA) {
+    const currentHalf = log[revealedHalfInnings] || log[log.length - 1];
+    card.appendChild(renderFieldDiagram(currentHalf, currentPA, result, gv));
   }
 
-  // Mid-game substitutions that happened during revealed innings so far.
-  const subsSoFar = (result.game.subs || []).filter(s => {
-    const idx = log.findIndex(h => h.inning === s.inning && h.half === s.half);
-    return idx >= 0 && idx < gv.revealedHalfInnings;
-  });
-
   const boardWrap = el("div", { style: "margin-top:14px;" });
-  for (let i = 0; i < gv.revealedHalfInnings; i++) {
+  for (let i = 0; i < revealedHalfInnings; i++) {
     const half = log[i];
     const inningCard = el("div", { style: "margin-bottom:10px;" });
     inningCard.appendChild(el("h3", {}, `${half.half === "top" ? "Top" : "Bottom"} ${half.inning}${half.runsThisHalf > 0 ? ` — ${half.runsThisHalf} run${half.runsThisHalf > 1 ? "s" : ""}` : ""}`));
@@ -1340,17 +1487,37 @@ function renderLiveGameCard(gv) {
     }
     boardWrap.appendChild(inningCard);
   }
+  // Plays already resolved within the CURRENT (not-yet-locked) half-inning,
+  // so completed at-bats don't disappear while later ones in the same
+  // half-inning are still being played out pitch by pitch.
+  if (!gv.finished && currentPA) {
+    const currentHalf = log[revealedHalfInnings];
+    if (currentHalf) {
+      const paInHalfSoFar = pitchLog.slice(0, gv.paIndex).filter(x => x.inning === currentHalf.inning && x.half === currentHalf.half);
+      if (paInHalfSoFar.length) {
+        const inProgressCard = el("div", { style: "margin-bottom:10px;" });
+        inProgressCard.appendChild(el("h3", {}, `${currentHalf.half === "top" ? "Top" : "Bottom"} ${currentHalf.inning}`));
+        for (const pa of paInHalfSoFar) {
+          inProgressCard.appendChild(el("div", { class: "log-line" }, describePAResult(pa.batter, pa.result, pa.runsScored, pa.outsAfter)));
+        }
+        boardWrap.appendChild(inProgressCard);
+      }
+    }
+  }
   card.appendChild(boardWrap);
 
   const btnRow = el("div", { class: "btn-row" });
   if (!gv.finished) {
+    const pitchesThrown = gv.pitchIndex;
+    const pitchesTotal = currentPA ? currentPA.pitches.length : 0;
+    const isMidPitch = pitchesThrown < pitchesTotal;
     btnRow.appendChild(el("button", {
       class: "btn amber",
-      onclick: () => { GAME_VIEW.revealedHalfInnings++; renderAll(); }
-    }, "Next Half-Inning →"));
+      onclick: () => advanceGamePitch()
+    }, isMidPitch ? "Next Pitch →" : "Result →"));
     btnRow.appendChild(el("button", {
       class: "btn secondary",
-      onclick: () => { GAME_VIEW.revealedHalfInnings = totalHalves; GAME_VIEW.finished = true; renderAll(); }
+      onclick: () => { GAME_VIEW.paIndex = totalPAs; GAME_VIEW.animPhase = null; GAME_VIEW.finished = true; renderAll(); }
     }, "Sim Rest of Game"));
   } else {
     const winnerName = result.winner.name;
@@ -1364,14 +1531,54 @@ function renderLiveGameCard(gv) {
   return card;
 }
 
-// Renders an SVG diamond with runners on base, plus current batter/pitcher,
-// the ball-strike count, and the last-pitch speed/type.
-function renderFieldDiagram(currentHalf, lastPA, result) {
+// Advances the live game by exactly one step: either reveals the next pitch
+// of the current at-bat (with a throw/swing animation), or - once every
+// pitch of the at-bat has been shown - resolves the at-bat's outcome and
+// moves on to the next plate appearance.
+function advanceGamePitch() {
+  const gv = GAME_VIEW;
+  if (!gv) return;
+  const pitchLog = gv.result.game.pitchLog || [];
+  const currentPA = pitchLog[gv.paIndex];
+  if (!currentPA) { gv.finished = true; renderAll(); return; }
+
+  if (gv.pitchIndex < currentPA.pitches.length) {
+    gv.pitchIndex++;
+    gv.animPhase = "pitching";
+    renderAll();
+    // Let the wind-up/throw/swing animation play out, then settle before
+    // the next click is meaningful again (mirrors a real pitch's pacing).
+    setTimeout(() => {
+      if (GAME_VIEW === gv) { gv.animPhase = "settled"; renderAll(); }
+    }, 650);
+  } else {
+    gv.animPhase = "outcome";
+    gv.paIndex++;
+    gv.pitchIndex = 0;
+    renderAll();
+    setTimeout(() => {
+      if (GAME_VIEW === gv) { gv.animPhase = null; renderAll(); }
+    }, 900);
+  }
+}
+
+// Renders an SVG diamond with runners on base, the pitcher/batter dots
+// (animated on each pitch thrown), the current batter/pitcher, the
+// ball-strike count, and the last-pitch speed/type. `gv` (the live
+// GAME_VIEW) drives which animation phase to show: a throw as gv.pitchIndex
+// pitches have been revealed, a swing/take following it, and — once the PA's
+// pitches run out — a flashed outcome banner (K, BB, hit, HR, out).
+function renderFieldDiagram(currentHalf, currentPA, result, gv) {
   const box = el("div", { class: "field-diagram-wrap" });
-  const bases = lastPA ? lastPA.basesAfter : [null, null, null];
-  const outs = lastPA ? lastPA.outsAfter : 0;
-  const battingTeam = currentHalf.half === "top" ? result.awayTeam : result.homeTeam;
-  const pitchingTeam = currentHalf.half === "top" ? result.homeTeam : result.awayTeam;
+  const isOutcomePhase = gv && gv.animPhase === "outcome";
+  // Bases/outs as they stood entering this PA (i.e. before it's resolved):
+  // approximate with basesAfter of the previous PA in this half if available.
+  const pitchLog = result.game.pitchLog || [];
+  const paIdx = pitchLog.indexOf(currentPA);
+  const prevPA = paIdx > 0 ? pitchLog[paIdx - 1] : null;
+  const prevSameHalf = prevPA && prevPA.inning === currentPA.inning && prevPA.half === currentPA.half ? prevPA : null;
+  const displayBases = isOutcomePhase ? currentPA.basesAfter : (prevSameHalf ? prevSameHalf.basesAfter : [null, null, null]);
+  const displayOuts = isOutcomePhase ? currentPA.outsAfter : (prevSameHalf ? prevSameHalf.outsAfter : 0);
   const p = STATE.player;
 
   // SVG diamond: home at bottom, 1B right, 2B top, 3B left.
@@ -1386,7 +1593,7 @@ function renderFieldDiagram(currentHalf, lastPA, result) {
   svg.appendChild(diamond);
   const baseCoords = { 1: [160, 100], 2: [100, 40], 3: [40, 100] }; // 1B, 2B, 3B
   for (const [num, [cx, cy]] of Object.entries(baseCoords)) {
-    const occupied = bases[Number(num) - 1];
+    const occupied = displayBases[Number(num) - 1];
     const rect = document.createElementNS(NS, "rect");
     rect.setAttribute("x", cx - 8); rect.setAttribute("y", cy - 8);
     rect.setAttribute("width", 16); rect.setAttribute("height", 16);
@@ -1399,17 +1606,68 @@ function renderFieldDiagram(currentHalf, lastPA, result) {
   home.setAttribute("transform", "rotate(45 100 160)");
   home.setAttribute("class", "base home");
   svg.appendChild(home);
+
+  // Pitcher on the mound - nudges up/down on a throw.
+  const isThrowing = gv && gv.animPhase === "pitching";
+  const moundGroup = document.createElementNS(NS, "g");
+  if (isThrowing) moundGroup.setAttribute("class", "pitcher-wind");
   const mound = document.createElementNS(NS, "circle");
   mound.setAttribute("cx", 100); mound.setAttribute("cy", 108); mound.setAttribute("r", 6);
   mound.setAttribute("class", "mound");
-  svg.appendChild(mound);
+  moundGroup.appendChild(mound);
+  const pitcherDot = document.createElementNS(NS, "circle");
+  pitcherDot.setAttribute("cx", 100); pitcherDot.setAttribute("cy", 108); pitcherDot.setAttribute("r", 4);
+  pitcherDot.setAttribute("class", "pitcher-dot");
+  moundGroup.appendChild(pitcherDot);
+  svg.appendChild(moundGroup);
+
+  // Batter's box dot near home plate.
+  const batterDot = document.createElementNS(NS, "circle");
+  batterDot.setAttribute("cx", 116); batterDot.setAttribute("cy", 150); batterDot.setAttribute("r", 4);
+  batterDot.setAttribute("class", "batter-dot");
+  svg.appendChild(batterDot);
+
+  // The pitch itself: a small ball that flies from the mound toward the
+  // plate whenever a new pitch is thrown (re-triggered each render by
+  // recreating the element, since CSS animations only replay on insertion).
+  if (isThrowing) {
+    const ball = document.createElementNS(NS, "circle");
+    ball.setAttribute("cx", 100); ball.setAttribute("cy", 108); ball.setAttribute("r", 3.5);
+    ball.setAttribute("class", "pitch-ball throwing");
+    svg.appendChild(ball);
+  }
+
+  // Bat swing flash near the batter's box, timed to land just after the
+  // pitch arrives (see .bat-swing animation-delay in CSS).
+  if (isThrowing) {
+    const bat = document.createElementNS(NS, "line");
+    bat.setAttribute("x1", 116); bat.setAttribute("y1", 150);
+    bat.setAttribute("x2", 132); bat.setAttribute("y2", 150);
+    bat.setAttribute("stroke", "var(--chalk)");
+    bat.setAttribute("stroke-width", "3");
+    bat.setAttribute("stroke-linecap", "round");
+    bat.setAttribute("class", "bat-swing swinging");
+    svg.appendChild(bat);
+  }
+
   box.appendChild(svg);
 
+  const infoWrap = el("div", { style: "min-width:160px;" });
+
+  // Outcome banner - flashes the plate appearance's result once its pitches
+  // have all been shown.
+  if (isOutcomePhase) {
+    const r = currentPA.result;
+    const kind = r === "HR" ? "hr" : r === "BB" ? "bb" : (r === "SO" || r === "OUT") ? "out" : "hit";
+    const label = describePAResult(currentPA.batter, r, currentPA.runsScored, currentPA.outsAfter);
+    infoWrap.appendChild(el("div", { class: `pa-outcome-flash ${kind} show` }, label));
+  }
+
   const info = el("div", { class: "field-info" });
-  const battingLabel = lastPA ? lastPA.batter.name : "—";
-  const pitchingLabel = lastPA ? lastPA.pitcher.name : "—";
-  const isBatterUser = p && lastPA && lastPA.batter.id === p.id;
-  const isPitcherUser = p && lastPA && lastPA.pitcher.id === p.id;
+  const battingLabel = currentPA ? currentPA.batter.name : "—";
+  const pitchingLabel = currentPA ? currentPA.pitcher.name : "—";
+  const isBatterUser = p && currentPA && currentPA.batter.id === p.id;
+  const isPitcherUser = p && currentPA && currentPA.pitcher.id === p.id;
   info.appendChild(el("div", { class: "field-info-row" }, [
     el("span", { class: "field-info-lbl" }, "At Bat"),
     el("span", { style: isBatterUser ? "color:var(--amber);font-weight:700;" : "" }, battingLabel + (isBatterUser ? " (You)" : ""))
@@ -1418,22 +1676,29 @@ function renderFieldDiagram(currentHalf, lastPA, result) {
     el("span", { class: "field-info-lbl" }, "Pitching"),
     el("span", { style: isPitcherUser ? "color:var(--amber);font-weight:700;" : "" }, pitchingLabel + (isPitcherUser ? " (You)" : ""))
   ]));
-  const lastPitch = lastPA && lastPA.pitches && lastPA.pitches.length ? lastPA.pitches[lastPA.pitches.length - 1] : null;
+  const pitchesShown = gv ? gv.pitchIndex : (currentPA ? currentPA.pitches.length : 0);
+  const lastPitch = currentPA && currentPA.pitches && pitchesShown > 0 ? currentPA.pitches[pitchesShown - 1] : null;
   if (lastPitch) {
     info.appendChild(el("div", { class: "field-info-row" }, [
       el("span", { class: "field-info-lbl" }, "Count"),
       el("span", {}, `${lastPitch.balls}-${lastPitch.strikes}`)
     ]));
     info.appendChild(el("div", { class: "field-info-row" }, [
-      el("span", { class: "field-info-lbl" }, "Last Pitch"),
+      el("span", { class: "field-info-lbl" }, "Pitch"),
       el("span", {}, `${lastPitch.type}, ${lastPitch.mph} mph`)
+    ]));
+  } else {
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Count"),
+      el("span", {}, "0-0")
     ]));
   }
   info.appendChild(el("div", { class: "field-info-row" }, [
     el("span", { class: "field-info-lbl" }, "Outs"),
-    el("span", {}, String(outs))
+    el("span", {}, String(displayOuts))
   ]));
-  box.appendChild(info);
+  infoWrap.appendChild(info);
+  box.appendChild(infoWrap);
   return box;
 }
 
@@ -1443,10 +1708,24 @@ function renderFinalLineupsCard(gv) {
   const card = el("div", { class: "card" });
   card.appendChild(el("h2", {}, "Final Lineups"));
   card.appendChild(el("p", { class: "small-note" }, `Final: ${result.awayTeam.name} ${result.awayScore} — ${result.homeTeam.name} ${result.homeScore}. ${result.winner.name} win.`));
+  card.appendChild(renderLineScoreTable(result));
+  card.appendChild(el("p", { class: "small-note" }, `W: ${result.winningPitcher.name} · L: ${result.losingPitcher.name}`));
+
+  const potg = pickPlayerOfTheGame(result);
+  if (potg) {
+    const isUser = STATE.player && potg.player.id === STATE.player.id;
+    const line = potg.kind === "batting"
+      ? `${potg.line.H}-for-${potg.line.AB}, ${potg.line.R || 0} R, ${potg.line.RBI} RBI${potg.line.HR ? `, ${potg.line.HR} HR` : ""}`
+      : `${(potg.line.outs / 3).toFixed(1)} IP, ${potg.line.SO} K, ${potg.line.ER} ER`;
+    card.appendChild(el("div", { class: "card", style: "background:var(--panel-2, rgba(255,255,255,0.04));margin-top:8px;margin-bottom:8px;" }, [
+      el("h3", { style: "margin:0 0 4px 0;" }, "⭐ Player of the Game"),
+      el("p", { style: `margin:0;${isUser ? "color:var(--amber);font-weight:700;" : ""}` }, `${potg.player.name}${isUser ? " (You)" : ""} — ${line}`)
+    ]));
+  }
 
   const grid = el("div", { class: "grid-2" });
-  grid.appendChild(finalLineupColumn(result.awayTeam, result.awayLineup, result.awayStartingPitcher, result.game.subs.filter(s => s.team === "away"), STATE.player));
-  grid.appendChild(finalLineupColumn(result.homeTeam, result.homeLineup, result.homeStartingPitcher, result.game.subs.filter(s => s.team === "home"), STATE.player));
+  grid.appendChild(finalLineupColumn(result.awayTeam, result.awayLineup, result.awayStartingPitcher, result.game.subs.filter(s => s.team === "away"), STATE.player, result.game, "away"));
+  grid.appendChild(finalLineupColumn(result.homeTeam, result.homeLineup, result.homeStartingPitcher, result.game.subs.filter(s => s.team === "home"), STATE.player, result.game, "home"));
   card.appendChild(grid);
 
   const btnRow = el("div", { class: "btn-row" });
@@ -1458,24 +1737,45 @@ function renderFinalLineupsCard(gv) {
   return card;
 }
 
-function finalLineupColumn(team, lineupInfo, startingPitcher, subs, userPlayer) {
+function finalLineupColumn(team, lineupInfo, startingPitcher, subs, userPlayer, game, side) {
   const box = el("div");
   box.appendChild(el("h3", {}, team.name));
   const table = el("table", { class: "stat-table" });
-  table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
+  table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR", "AB", "R", "H", "RBI", "HR", "BB", "K", "AVG", "TOTALHR", "TOTALRBI"].map(h => el("th", {}, h))));
   const battingSubs = subs.filter(s => s.kind === "batting");
   for (const slot of lineupInfo.order) {
     const replacedBy = battingSubs.find(s => s.outPlayer.id === slot.player.id);
     const finalPlayer = replacedBy ? replacedBy.inPlayer : slot.player;
     const isUser = userPlayer && finalPlayer.id === userPlayer.id;
+    // Combine the starter's and (if replaced) the sub's game lines into one
+    // row, since either one may have batted/scored during the game.
+    const startLine = game && game.lines.get(slot.player.id);
+    const subLine = replacedBy && game ? game.lines.get(replacedBy.inPlayer.id) : null;
+    const sum = (key) => (startLine ? startLine[key] || 0 : 0) + (subLine ? subLine[key] || 0 : 0);
+    const AB = sum("AB"), R = sum("R"), H = sum("H"), RBI = sum("RBI"), HR = sum("HR"), BB = sum("BB"), K = sum("SO");
+    const AVG = AB > 0 ? fmt3(H / AB) : fmt3(0);
+    const totalHR = finalPlayer.seasonStats ? finalPlayer.seasonStats.batting.HR : HR;
+    const totalRBI = finalPlayer.seasonStats ? finalPlayer.seasonStats.batting.RBI : RBI;
     table.appendChild(el("tr", { style: isUser ? "color:var(--amber);font-weight:700;" : "" }, [
       el("td", {}, String(slot.battingOrder)),
       el("td", {}, slot.position),
       el("td", {}, finalPlayer.name + (isUser ? " (You)" : "") + (replacedBy ? ` (for ${slot.player.name})` : "")),
-      el("td", {}, String(battingOverall(finalPlayer)))
+      el("td", {}, String(battingOverall(finalPlayer))),
+      el("td", {}, String(AB)),
+      el("td", {}, String(R)),
+      el("td", {}, String(H)),
+      el("td", {}, String(RBI)),
+      el("td", {}, String(HR)),
+      el("td", {}, String(BB)),
+      el("td", {}, String(K)),
+      el("td", {}, AVG),
+      el("td", {}, String(totalHR)),
+      el("td", {}, String(totalRBI))
     ]));
   }
   box.appendChild(table);
+  const lob = game && game.lob ? (game.lob[side] || 0) : 0;
+  box.appendChild(el("p", { class: "small-note" }, `LOB: ${lob}`));
 
   const pitchingSubs = subs.filter(s => s.kind === "pitching");
   const finalPitcher = pitchingSubs.length ? pitchingSubs[pitchingSubs.length - 1].inPlayer : startingPitcher;
@@ -1491,6 +1791,7 @@ function finalLineupColumn(team, lineupInfo, startingPitcher, subs, userPlayer) 
   }
   return box;
 }
+
 
 function summarizeResults(results) {
   return results.slice(0, 12).map(r => `${r.awayTeam.name} ${r.awayScore} @ ${r.homeTeam.name} ${r.homeScore} — ${r.winner.name} win`);

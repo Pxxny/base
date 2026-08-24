@@ -109,12 +109,17 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
   stats.PA++;
   if (pstats) pstats.BF = (pstats.BF || 0) + 1;
 
+  // scorers collects the actual runner (player object) for each run scored
+  // during this plate appearance, in the order they crossed the plate, so
+  // callers can credit each one's box-score R individually rather than
+  // just incrementing a bare counter.
+  const scorers = [];
   const advanceRunners = (bases, numAdvance, scoreOnHome = true) => {
     let runsScored = 0;
     for (let i = 3; i >= 0; i--) {
       if (bases[i]) {
         const newBase = i + numAdvance;
-        if (newBase >= 3) { runsScored++; bases[i] = null; }
+        if (newBase >= 3) { runsScored++; scorers.push(bases[i]); bases[i] = null; }
         else { bases[newBase] = bases[i]; if (newBase !== i) bases[i] = null; }
       }
     }
@@ -136,7 +141,7 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
       // force advance only where needed
       if (bases[0]) {
         if (bases[1]) {
-          if (bases[2]) runs++;
+          if (bases[2]) { runs++; scorers.push(bases[2]); }
           bases[2] = bases[1];
         }
         bases[1] = bases[0];
@@ -148,7 +153,7 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
       game.outs[battingTeamKey]++;
       // occasionally advance a runner (sac-like), simplified: 15% chance runner on 3rd scores
       if (bases[2] && Math.random() < 0.35 && game.outs[battingTeamKey] <= 2) {
-        runs++; bases[2] = null;
+        runs++; scorers.push(bases[2]); bases[2] = null;
       }
       break;
     case "1B":
@@ -174,12 +179,19 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
       if (pstats) pstats.H = (pstats.H || 0) + 1;
       runs += advanceRunners(bases, 3); // clears bases
       runs += 1; // batter scores
+      scorers.push(batter);
       stats.RBI += runs;
       break;
   }
   if (result !== "HR" && runs > 0) stats.RBI += runs;
   if (pstats && runs > 0) pstats.ER = (pstats.ER || 0) + runs;
   game.score[battingTeamKey] += runs;
+  // Credit each actual scorer's box-score line, so the final box score can
+  // report who scored the runs — not just how many runs were scored.
+  for (const scorer of scorers) {
+    const scorerStats = game.playerLine(scorer);
+    scorerStats.R = (scorerStats.R || 0) + 1;
+  }
   return runs;
 }
 
@@ -197,6 +209,7 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     bases: { home: [null, null, null], away: [null, null, null] },
     outs: { home: 0, away: 0 },
     score: { home: 0, away: 0 },
+    lob: { home: 0, away: 0 },
     lines: new Map(),
     pitcherLines: new Map(),
     log: [], // array of { inning, half: "top"|"bottom", plays: [string], runsThisHalf, scoreAfter: {home,away} }
@@ -253,12 +266,14 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     game.outs.away = 0; game.bases.away = [null, null, null];
     const topPlays = [];
     let topRunsBefore = game.score.away;
+    let topHits = 0;
     while (game.outs.away < 3 && awayLineup.length) {
       const batter = awayLineup[awayIdx % awayLineup.length]; awayIdx++;
       const pitchSeq = [];
       const res = simPlateAppearance(batter, homePitcher, (pi) => pitchSeq.push(pi));
       bumpPitchCount(homePitcher, pitchSeq.length);
       const runs = applyPAResult(game, "away", batter, homePitcher, res.result, inning);
+      if (["1B", "2B", "3B", "HR"].includes(res.result)) topHits++;
       if (recordLog) {
         topPlays.push(describePAResult(batter, res.result, runs, game.outs.away));
         game.pitchLog.push({
@@ -269,9 +284,11 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
         });
       }
     }
+    game.lob.away += game.bases.away.filter(Boolean).length;
     if (recordLog) game.log.push({
       inning, half: "top", plays: topPlays,
       runsThisHalf: game.score.away - topRunsBefore,
+      hitsThisHalf: topHits,
       scoreAfter: { home: game.score.home, away: game.score.away }
     });
 
@@ -281,12 +298,14 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     game.outs.home = 0; game.bases.home = [null, null, null];
     const bottomPlays = [];
     let bottomRunsBefore = game.score.home;
+    let bottomHits = 0;
     while (game.outs.home < 3 && homeLineup.length) {
       const batter = homeLineup[homeIdx % homeLineup.length]; homeIdx++;
       const pitchSeq = [];
       const res = simPlateAppearance(batter, awayPitcher, (pi) => pitchSeq.push(pi));
       bumpPitchCount(awayPitcher, pitchSeq.length);
       const runs = applyPAResult(game, "home", batter, awayPitcher, res.result, inning);
+      if (["1B", "2B", "3B", "HR"].includes(res.result)) bottomHits++;
       if (recordLog) {
         bottomPlays.push(describePAResult(batter, res.result, runs, game.outs.home));
         game.pitchLog.push({
@@ -299,9 +318,11 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
       // Walk-off: home team takes the lead in the bottom of the 9th (or later) - game ends immediately
       if (inning >= maxInnings && game.score.home > game.score.away) break;
     }
+    game.lob.home += game.bases.home.filter(Boolean).length;
     if (recordLog) game.log.push({
       inning, half: "bottom", plays: bottomPlays,
       runsThisHalf: game.score.home - bottomRunsBefore,
+      hitsThisHalf: bottomHits,
       scoreAfter: { home: game.score.home, away: game.score.away }
     });
 
@@ -338,6 +359,53 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
   };
 }
 
+// Picks the standout performer of a completed game from both teams' box
+// score lines, batters and pitchers alike, using a simple weighted score
+// (hits/power/RBI/runs for hitters, outs recorded/strikeouts/runs allowed
+// for pitchers) so a dominant pitching outing can win it over a quiet
+// batting line, and vice versa.
+function pickPlayerOfTheGame(result) {
+  let best = null, bestScore = -Infinity;
+
+  for (const line of result.game.lines.values()) {
+    const score = line.H * 1 + line["2B"] * 1 + line["3B"] * 2 + line.HR * 4
+      + line.RBI * 1.5 + (line.R || 0) * 1 + line.BB * 0.3 - line.SO * 0.2;
+    if (score > bestScore) { bestScore = score; best = { player: line.player, kind: "batting", line }; }
+  }
+
+  for (const line of result.game.pitcherLines.values()) {
+    const ip = line.outs / 3;
+    if (ip <= 0) continue;
+    const win = line.player === result.winningPitcher ? 2 : 0;
+    const score = ip * 1.4 + line.SO * 0.6 + win - line.ER * 1.8 - line.H * 0.3 - line.BB * 0.4;
+    if (score > bestScore) { bestScore = score; best = { player: line.player, kind: "pitching", line }; }
+  }
+
+  return best;
+}
+
+// Builds a classic line-score (1-9+ innings, R/H/E totals) from game.log,
+// for the box-score header shown on the live and final game-day screens.
+// Errors aren't modeled by the simulation (every out is clean), so E is
+// always reported as 0 rather than fabricating a stat the sim doesn't track.
+function buildLineScore(game) {
+  const innings = [...new Set(game.log.map(h => h.inning))].sort((a, b) => a - b);
+  const away = innings.map(n => {
+    const half = game.log.find(h => h.inning === n && h.half === "top");
+    return half ? half.runsThisHalf : null; // null = didn't get here (e.g. game-ending walk-off skips bottom)
+  });
+  const home = innings.map(n => {
+    const half = game.log.find(h => h.inning === n && h.half === "bottom");
+    return half ? half.runsThisHalf : null;
+  });
+  const totalHits = (team) => game.log.filter(h => (team === "away" ? h.half === "top" : h.half === "bottom")).reduce((sum, h) => sum + (h.hitsThisHalf || 0), 0);
+  return {
+    innings,
+    away: { byInning: away, R: game.score.away, H: totalHits("away"), E: 0 },
+    home: { byInning: home, R: game.score.home, H: totalHits("home"), E: 0 }
+  };
+}
+
 // Apply box score lines into player season/career stats
 function commitGameStats(result) {
   for (const line of result.game.lines.values()) {
@@ -346,7 +414,7 @@ function commitGameStats(result) {
     s.G++; s.PA += line.PA; s.AB += line.AB; s.H += line.H;
     s["1B"] += line["1B"]; s["2B"] += line["2B"]; s["3B"] += line["3B"]; s.HR += line.HR;
     s.RBI += line.RBI; s.BB += line.BB; s.SO += line.SO;
-    if ((p.teamId === result.winner.id)) s.R += Math.round(line.RBI * 0.6); // approximation
+    s.R += line.R || 0; // actual runs scored, tracked per-play in applyPAResult
     if (p.isUser) trackUserPlayingTime(p, true);
   }
   for (const line of result.game.pitcherLines.values()) {

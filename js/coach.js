@@ -155,14 +155,36 @@ function assignFieldPositions(starters) {
 // gets the ball far more often than a marginal back-of-rotation arm,
 // instead of being diluted into a coin-flip against everyone else in a
 // same-sized pool.
+//
+// Rest: real starting rotations work on ~4-5 days' rest between starts
+// (a 5-man rotation), not "whoever scores highest every single day."
+// p.lastStartDay records the STATE.day a pitcher last started, and a
+// pitcher who started fewer than REST_DAYS_MIN days ago is excluded from
+// today's pool outright, same as a real manager skipping a starter's turn.
+// If every starter on the roster is currently short-rested (a thin staff,
+// early in a career, etc), rest is relaxed just enough to field a pitcher
+// rather than leaving a team with nobody eligible to start.
+const REST_DAYS_MIN = 4; // must have started at least this many days ago
 function pickStartingPitcher(team) {
   const coach = getTeamCoach(team);
-  const sps = (team.roster || []).filter(p => p.position === "SP" && p.health.status === "Healthy");
+  const today = (typeof STATE !== "undefined" && STATE) ? STATE.day : null;
+  const allSps = (team.roster || []).filter(p => p.position === "SP" && p.health.status === "Healthy");
+  const daysSinceStart = (p) => (today == null || typeof p.lastStartDay !== "number") ? Infinity : today - p.lastStartDay;
+  let sps = allSps.filter(p => daysSinceStart(p) >= REST_DAYS_MIN);
+  // Nobody's rested (short staff, or every arm just pitched) - fall back to
+  // whoever has the most rest so the game still has a starter, rather than
+  // refusing to field one.
+  if (!sps.length) sps = [...allSps].sort((a, b) => daysSinceStart(b) - daysSinceStart(a));
   if (!sps.length) {
     const anyP = (team.roster || []).filter(p => isPitcher(p.position)).sort((a, b) => pitchingOverall(b) - pitchingOverall(a));
-    return anyP.length ? anyP[0] : createPlayer({ position: "SP" });
+    const emergency = anyP.length ? anyP[0] : createPlayer({ position: "SP" });
+    if (today != null) emergency.lastStartDay = today;
+    return emergency;
   }
-  if (sps.length === 1) return sps[0];
+  if (sps.length === 1) {
+    if (today != null) sps[0].lastStartDay = today;
+    return sps[0];
+  }
 
   const scored = sps.map(p => {
     let score = pitchingOverall(p) * 1.5; // dominant factor: raw talent
@@ -187,11 +209,14 @@ function pickStartingPitcher(team) {
   const weights = scored.map(s => Math.pow(1.16, (s.score - minScore) + rnd(-2, 2)));
   const totalWeight = weights.reduce((a, b) => a + b, 0);
   let roll = Math.random() * totalWeight;
+  let chosen = null;
   for (let i = 0; i < scored.length; i++) {
     roll -= weights[i];
-    if (roll <= 0) return scored[i].player;
+    if (roll <= 0) { chosen = scored[i].player; break; }
   }
-  return scored.sort((a, b) => b.score - a.score)[0].player;
+  if (!chosen) chosen = scored.sort((a, b) => b.score - a.score)[0].player;
+  if (today != null) chosen.lastStartDay = today;
+  return chosen;
 }
 
 // Bullpen arms available for in-game relief substitutions, best-first.
