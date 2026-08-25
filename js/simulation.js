@@ -37,11 +37,12 @@ function rollPitch(pitcher) {
 // onPitch(pitchInfo) is an optional callback invoked for each simulated
 // pitch of the at-bat (for the pitch-by-pitch log), receiving the pitch
 // and running count.
-function simPlateAppearance(batter, pitcher, onPitch) {
+function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
   const bOv = isPitcher(batter.position) ? 40 : battingOverall(batter);
   const pOv = pitcher ? pitchingOverall(pitcher) : 50;
   const b = batter.batting;
-  const diff = bOv - pOv; // positive favors batter
+  const rivalryClutch = matchup && matchup.batterId === batter.id ? (matchup.clutch || 0) : 0;
+  const diff = bOv - pOv + rivalryClutch * 0.35; // positive favors batter
 
   // Base probabilities (league-average-ish), shifted by skill diff
   let kChance = clamp(0.22 - diff * 0.0016 - (b.plateDiscipline - 50) * 0.001, 0.05, 0.45);
@@ -106,6 +107,15 @@ function describeSub(kind, outPlayer, inPlayer, note) {
 function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
   const stats = game.playerLine(batter);
   const pstats = pitcher ? game.pitcherLine(pitcher) : null;
+  if (pitcher) {
+    const key = `${batter.id}:${pitcher.id}`;
+    if (!game.matchupLines.has(key)) game.matchupLines.set(key, { batterId: batter.id, pitcherId: pitcher.id, AB: 0, H: 0, SO: 0, BB: 0 });
+    const ml = game.matchupLines.get(key);
+    if (result !== "BB") ml.AB++;
+    if (["1B","2B","3B","HR"].includes(result)) ml.H++;
+    if (result === "SO") ml.SO++;
+    if (result === "BB") ml.BB++;
+  }
   stats.PA++;
   if (pstats) pstats.BF = (pstats.BF || 0) + 1;
 
@@ -215,6 +225,7 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     lines: new Map(),
     pitcherLines: new Map(),
     pitcherUsage: new Map(),
+    matchupLines: new Map(),
     log: [],
     pitchLog: [],
     subs: [],
@@ -272,6 +283,11 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
   let awayPitcher = pickStartingPitcher(awayTeam);
   const homeStartingPitcher = homePitcher;
   const awayStartingPitcher = awayPitcher;
+  const matchupFor = (batter, pitchingTeam) => {
+    if (!opts.rivalry) return null;
+    const pitcherEffect = opts.rivalry.pitcherEffects?.[pitchingTeam === homeTeam ? (homePitcher?.id) : (awayPitcher?.id)] || 0;
+    return { ...opts.rivalry, batterId: batter.id, clutch: (opts.rivalry.clutch || 0) + pitcherEffect };
+  };
   const pitchCounts = new Map();
   const bumpPitchCount = (p, n) => pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);
 
@@ -400,7 +416,7 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
       registerAppearance(homePitcher, "home", inning, "top");
       const batter = awayLineup[awayIdx % awayLineup.length]; awayIdx++;
       const pitchSeq = [];
-      const res = simPlateAppearance(batter, homePitcher, pi => pitchSeq.push(pi));
+      const res = simPlateAppearance(batter, homePitcher, pi => pitchSeq.push(pi), matchupFor(batter, homeTeam));
       bumpPitchCount(homePitcher, pitchSeq.length);
       const runs = applyPAResult(game, "away", batter, homePitcher, res.result, inning);
       if (["1B", "2B", "3B", "HR"].includes(res.result)) topHits++;
@@ -447,7 +463,7 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
       registerAppearance(awayPitcher, "away", inning, "bottom");
       const batter = homeLineup[homeIdx % homeLineup.length]; homeIdx++;
       const pitchSeq = [];
-      const res = simPlateAppearance(batter, awayPitcher, pi => pitchSeq.push(pi));
+      const res = simPlateAppearance(batter, awayPitcher, pi => pitchSeq.push(pi), matchupFor(batter, awayTeam));
       bumpPitchCount(awayPitcher, pitchSeq.length);
       const runs = applyPAResult(game, "home", batter, awayPitcher, res.result, inning);
       if (["1B", "2B", "3B", "HR"].includes(res.result)) bottomHits++;

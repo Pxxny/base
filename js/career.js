@@ -103,7 +103,14 @@ function newGameState() {
     saveSlot: null,
     seasonRecap: null,
     pendingContractDecision: false,
-    contractOffers: null
+    contractOffers: null,
+    rivalries: {},
+    tradeOffers: [],
+    waiverClaims: [],
+    freeAgentPool: [],
+    transactionLog: [],
+    transactionState: { lastTradeDay: 0, lastWaiverDay: 0, lastFAActionDay: 0 },
+    h2h: {}
   };
 }
 
@@ -1210,7 +1217,7 @@ function renderAwardsView() {
 function screenTab(tab) {
   const wrap = el("div");
   if (tab === "gameday") { wrap.appendChild(renderGameDayView()); }
-  else if (tab === "career") { wrap.appendChild(renderPlayerCard(STATE.player)); wrap.appendChild(renderSimControls()); wrap.appendChild(renderRecentLog()); wrap.appendChild(renderAttributeCard(STATE.player)); }
+  else if (tab === "career") { wrap.appendChild(renderPlayerCard(STATE.player)); wrap.appendChild(renderSimControls()); wrap.appendChild(renderRivalryTransactions()); wrap.appendChild(renderRecentLog()); wrap.appendChild(renderAttributeCard(STATE.player)); }
   else if (tab === "roster") wrap.appendChild(renderRosterView());
   else if (tab === "coach") wrap.appendChild(renderCoachView());
   else if (tab === "training") wrap.appendChild(renderTrainingView());
@@ -1259,6 +1266,198 @@ function renderPlayerCard(p) {
   return card;
 }
 function statBox(lbl, val) { return el("div", { class: "stat-box" }, [el("div", { class: "val" }, String(val)), el("div", { class: "lbl" }, lbl)]); }
+
+
+// ============================================================
+// RIVALRY / TRANSACTIONS SYSTEM
+// ============================================================
+function ensureCareerSystems(state) {
+  state.rivalries ||= {};
+  state.tradeOffers ||= [];
+  state.waiverClaims ||= [];
+  state.freeAgentPool ||= [];
+  state.transactionLog ||= [];
+  state.transactionState ||= { lastTradeDay: 0, lastWaiverDay: 0, lastFAActionDay: 0 };
+}
+
+function rivalryKey(kind, id) { return `${kind}:${id}`; }
+
+function updateUserRivalries(state, result) {
+  const p = state.player;
+  if (!p || !result) return;
+  ensureCareerSystems(state);
+  const isUserBatter = !isPitcher(p.position);
+  const userLine = isUserBatter ? result.game.lines.get(p.id) : result.game.pitcherLines.get(p.id);
+  if (!userLine) return;
+
+  if (isUserBatter) {
+    for (const line of result.game.pitcherLines.values()) {
+      const u = result.game.pitcherUsage.get(line.player.id);
+      if (!u) continue;
+      const matchup = result.game.matchupLines && result.game.matchupLines.get(`${p.id}:${line.player.id}`);
+      if (!matchup || matchup.AB <= 0) continue;
+      const key = rivalryKey("pitcher", line.player.id);
+      const r = state.rivalries[key] ||= { kind: "pitcher", id: line.player.id, name: line.player.name, teamId: u.team === "home" ? result.homeTeam.id : result.awayTeam.id, meetings: 0, shutDowns: 0, hits: 0, atBats: 0, pressure: 0, redemption: 0 };
+      const ab = matchup.AB || 0;
+      const h = matchup.H || 0;
+      r.meetings++; r.atBats += ab; r.hits += h;
+      if (h === 0 && ab >= 2) r.shutDowns++;
+      r.pressure = clamp(r.shutDowns * 4 - r.hits * 0.5, -10, 20);
+      r.redemption = r.shutDowns >= 2 && h > 0 ? Math.min(15, r.redemption + 5) : Math.max(0, r.redemption - 1);
+    }
+    const oppTeam = result.homeTeam.id === p.teamId ? result.awayTeam : result.awayTeam.id === p.teamId ? result.homeTeam : null;
+    if (oppTeam) {
+      const key = rivalryKey("team", oppTeam.id);
+      const r = state.rivalries[key] ||= { kind: "team", id: oppTeam.id, name: oppTeam.name, teamId: oppTeam.id, meetings: 0, shutDowns: 0, hits: 0, atBats: 0, pressure: 0, redemption: 0 };
+      const ab = userLine.AB || 0, h = userLine.H || 0;
+      r.meetings++; r.atBats += ab; r.hits += h;
+      if (ab >= 3 && h === 0) r.shutDowns++;
+      r.pressure = clamp(r.shutDowns * 3 - r.hits * 0.25, -8, 15);
+      r.redemption = r.shutDowns >= 2 && h > 0 ? Math.min(12, r.redemption + 4) : r.redemption;
+    }
+  } else {
+    const oppTeam = result.homeTeam.id === p.teamId ? result.awayTeam : result.awayTeam.id === p.teamId ? result.homeTeam : null;
+    if (!oppTeam) return;
+    const key = rivalryKey("team", oppTeam.id);
+    const r = state.rivalries[key] ||= { kind: "team", id: oppTeam.id, name: oppTeam.name, teamId: oppTeam.id, meetings: 0, shutDowns: 0, hits: 0, atBats: 0, pressure: 0, redemption: 0 };
+    const er = userLine.ER || 0, outs = userLine.outs || 0, so = userLine.SO || 0;
+    r.meetings++;
+    if (outs >= 9 && er <= 1) r.shutDowns++;
+    else if (er >= 4) r.shutDowns = Math.max(0, r.shutDowns - 1);
+    r.pressure = clamp(r.shutDowns * 3 - so * 0.2, -8, 15);
+    if (r.shutDowns >= 2 && er <= 1) r.redemption = Math.min(12, r.redemption + 4);
+  }
+
+  const rivalEntries = Object.values(state.rivalries).filter(r => r.meetings >= 2).sort((a,b) => (b.shutDowns - a.shutDowns) || (b.pressure - a.pressure));
+  const top = rivalEntries[0];
+  if (top && top.shutDowns >= 2 && state.day % 7 === 0) {
+    addNews(state, `${p.name} seeks revenge against ${top.name} after repeated struggles.`, "A developing rivalry is turning routine games into a personal test.");
+  }
+}
+
+function rivalryModifierForGame(state, team, opponent) {
+  const p = state.player;
+  if (!p || !opponent) return { clutch: 0 };
+  const teamR = state.rivalries?.[rivalryKey("team", opponent.id)];
+  let clutch = teamR ? (teamR.redemption || 0) - (teamR.pressure || 0) : 0;
+  return { clutch: clamp(clutch, -12, 12), opponentTeamId: opponent.id };
+}
+
+function rosterRemove(team, player) { if (team) team.roster = (team.roster || []).filter(p => p.id !== player.id); }
+function rosterAdd(team, player) { if (team && !(team.roster || []).some(p => p.id === player.id)) team.roster.push(player); player.teamId = team.id; player.orgId = team.id; }
+
+function generateFreeAgentPool(state) {
+  ensureCareerSystems(state);
+  if (state.freeAgentPool.length >= 8) return;
+  for (let i = state.freeAgentPool.length; i < 12; i++) {
+    const level = state.player?.level || "Triple-A";
+    const p = createPlayer({ age: rnd(21, 31), levelHint: rnd(30, 58) });
+    p.level = level; p.contract = null; p.teamId = null; p.orgId = null;
+    state.freeAgentPool.push(p);
+  }
+}
+
+function processTransactions(state) {
+  ensureCareerSystems(state);
+  const p = state.player;
+  const team = p ? state.teams[p.teamId] : null;
+  if (!team) return;
+  const len = seasonLengthDaysForPlayer(p);
+  const deadline = Math.max(35, Math.floor(len * 0.62));
+
+  // Trade deadline: one meaningful proposal for a bench player.
+  if (state.day >= deadline && state.transactionState.lastTradeDay < deadline) {
+    state.transactionState.lastTradeDay = state.day;
+    const target = (team.roster || []).filter(x => x.id !== p.id && !isPitcher(x.position)).sort((a,b) => overallRating(a)-overallRating(b))[0];
+    const rivals = state.allTeams.filter(t => t.id !== team.id && t.league === team.league && (t.roster || []).length);
+    if (target && rivals.length) {
+      const from = pick(rivals), offer = [...from.roster].sort((a,b)=>overallRating(b)-overallRating(a))[0];
+      if (offer) {
+        state.tradeOffers.push({ id: uid(), day: state.day, fromTeamId: from.id, targetPlayerId: target.id, offeredPlayerId: offer.id, status: "pending" });
+        addNews(state, `TRADE TALK: ${TEAM_NAME(from.id)} offers ${offer.name} for ${target.name}.`);
+      }
+    }
+  }
+
+  // Weekly waiver churn: rival clubs can claim a low-use bench player.
+  if (state.day - state.transactionState.lastWaiverDay >= 7) {
+    state.transactionState.lastWaiverDay = state.day;
+    const bench = (team.roster || []).filter(x => x.id !== p.id && !isPitcher(x.position)).sort((a,b)=>overallRating(a)-overallRating(b))[0];
+    if (bench && Math.random() < 0.22) {
+      const rivals = state.allTeams.filter(t => t.id !== team.id && t.league === team.league);
+      const to = rivals.length ? pick(rivals) : null;
+      if (to) {
+        state.waiverClaims.push({ id: uid(), day: state.day, playerId: bench.id, toTeamId: to.id, status: "pending" });
+        addNews(state, `${to.name} placed a waiver claim on ${bench.name}.`);
+      }
+    }
+  }
+
+  // Late-season free-agent market.
+  if (state.day >= Math.floor(len * 0.55) && state.day - state.transactionState.lastFAActionDay >= 10) {
+    state.transactionState.lastFAActionDay = state.day;
+    generateFreeAgentPool(state);
+    for (const fa of state.freeAgentPool.slice(0, 2)) {
+      const needy = !team.roster.some(x => x.position === fa.position);
+      if (needy && Math.random() < 0.35) {
+        rosterAdd(team, fa); state.freeAgentPool = state.freeAgentPool.filter(x => x.id !== fa.id);
+        state.transactionLog.unshift({ day: state.day, type: "FA", playerId: fa.id, teamId: team.id });
+        addNews(state, `${team.name} signs free agent ${fa.name} to add depth.`);
+      }
+    }
+  }
+}
+
+function acceptTradeOffer(id) {
+  const offer = STATE.tradeOffers.find(x => x.id === id && x.status === "pending"); if (!offer) return;
+  const myTeam = STATE.teams[STATE.player.teamId], from = STATE.teams[offer.fromTeamId];
+  const target = myTeam?.roster.find(x => x.id === offer.targetPlayerId), incoming = from?.roster.find(x => x.id === offer.offeredPlayerId);
+  if (!target || !incoming) { offer.status = "expired"; return renderAll(); }
+  rosterRemove(myTeam, target); rosterRemove(from, incoming); rosterAdd(myTeam, incoming); rosterAdd(from, target);
+  offer.status = "accepted"; STATE.transactionLog.unshift({ day: STATE.day, type: "TRADE", in: incoming.id, out: target.id, team: myTeam.id });
+  addNews(STATE, `${STATE.player.name}'s club completes a trade: ${incoming.name} arrives for ${target.name}.`); toast("Trade accepted."); renderAll();
+}
+function rejectTradeOffer(id) { const o = STATE.tradeOffers.find(x => x.id === id); if (o) o.status = "rejected"; toast("Trade rejected."); renderAll(); }
+function resolveWaiverClaim(id, keep) {
+  const claim = STATE.waiverClaims.find(x => x.id === id && x.status === "pending"); if (!claim) return;
+  const myTeam = STATE.teams[STATE.player.teamId], to = STATE.teams[claim.toTeamId];
+  const player = myTeam?.roster.find(x => x.id === claim.playerId);
+  if (!keep && player && to) { rosterRemove(myTeam, player); rosterAdd(to, player); claim.status = "claimed"; addNews(STATE, `${player.name} was claimed off waivers by ${to.name}.`); }
+  else { claim.status = "retained"; }
+  renderAll();
+}
+function signFreeAgent(id) {
+  const idx = STATE.freeAgentPool.findIndex(x => x.id === id); if (idx < 0) return;
+  const team = STATE.teams[STATE.player.teamId], fa = STATE.freeAgentPool[idx];
+  rosterAdd(team, fa); STATE.freeAgentPool.splice(idx, 1); STATE.transactionLog.unshift({ day: STATE.day, type: "FA", playerId: fa.id, teamId: team.id });
+  addNews(STATE, `${TEAM_NAME(team.id)} signs free agent ${fa.name}.`); toast(`${fa.name} signed.`); renderAll();
+}
+
+function renderRivalryTransactions() {
+  ensureCareerSystems(STATE);
+  const wrap = el("div");
+  const rr = Object.values(STATE.rivalries).filter(r => r.meetings >= 2).sort((a,b)=>b.shutDowns-a.shutDowns).slice(0,6);
+  const rc = el("div", { class: "card" }); rc.appendChild(el("h2", {}, "Rivalry & Grudge Matchups"));
+  if (!rr.length) rc.appendChild(el("p", { class: "small-note" }, "Rivalries develop naturally after repeated struggles."));
+  for (const r of rr) rc.appendChild(el("div", { class: "news-item" }, `${r.name} — ${r.shutDowns} shutdowns · ${r.meetings} meetings · pressure ${r.pressure >= 0 ? "+" : ""}${r.pressure}`));
+  wrap.appendChild(rc);
+
+  const tc = el("div", { class: "card" }); tc.appendChild(el("h2", {}, "Trade Deadline & Waivers"));
+  const pendingT = STATE.tradeOffers.filter(x=>x.status === "pending");
+  if (!pendingT.length) tc.appendChild(el("p", { class: "small-note" }, "No pending trade proposals."));
+  for (const o of pendingT) {
+    const from = STATE.teams[o.fromTeamId], target = STATE.teams[STATE.player.teamId]?.roster.find(x=>x.id===o.targetPlayerId), incoming = from?.roster.find(x=>x.id===o.offeredPlayerId);
+    tc.appendChild(el("div", { class: "news-item" }, [el("div", {}, `${from?.name || "Rival"} offers ${incoming?.name || "a player"} for ${target?.name || "your player"}.`), el("div", { class:"btn-row" }, [el("button", {class:"btn amber", onclick:()=>acceptTradeOffer(o.id)}, "Accept"), el("button", {class:"btn secondary", onclick:()=>rejectTradeOffer(o.id)}, "Reject")])]));
+  }
+  for (const w of STATE.waiverClaims.filter(x=>x.status === "pending")) {
+    const pl = STATE.teams[STATE.player.teamId]?.roster.find(x=>x.id===w.playerId), to = STATE.teams[w.toTeamId];
+    if (!pl) continue;
+    tc.appendChild(el("div", { class:"news-item" }, [el("div", {}, `${to?.name || "Rival"} wants ${pl.name} on waivers.`), el("div", {class:"btn-row"}, [el("button", {class:"btn amber",onclick:()=>resolveWaiverClaim(w.id,true)},"Keep"),el("button", {class:"btn secondary",onclick:()=>resolveWaiverClaim(w.id,false)},"Let Go")])]));
+  }
+  generateFreeAgentPool(STATE);
+  for (const fa of STATE.freeAgentPool.slice(0,4)) tc.appendChild(el("div", {class:"btn-row"}, [el("span",{},`${fa.name} (${fa.position}, OVR ${overallRating(fa)})`),el("button",{class:"btn secondary",onclick:()=>signFreeAgent(fa.id)},"Sign")]));
+  wrap.appendChild(tc); return wrap;
+}
 
 // ---- Sim Controls ----
 function renderSimControls() {
@@ -1338,6 +1537,449 @@ function notifyIfUserStarting(result) {
     toast(`You're not in today's starting lineup.`);
   }
 }
+
+// ---- Head-to-Head history ----
+// Keeps a compact career-long record of the user's team against each opponent.
+// Only completed games are recorded, so the Game Day card can show true
+// historical results without relying on the transient GAME_VIEW object.
+function ensureH2H(state) {
+  if (!state.h2h || typeof state.h2h !== "object" || Array.isArray(state.h2h)) state.h2h = {};
+  return state.h2h;
+}
+
+function recordUserTeamH2H(state, result) {
+  const p = state && state.player;
+  if (!p || !result || !result.homeTeam || !result.awayTeam) return;
+  const userTeamId = p.teamId || p.orgId;
+  if (!userTeamId) return;
+  const isHome = result.homeTeam.id === userTeamId;
+  const isAway = result.awayTeam.id === userTeamId;
+  if (!isHome && !isAway) return;
+
+  const opponent = isHome ? result.awayTeam : result.homeTeam;
+  const userScore = isHome ? result.homeScore : result.awayScore;
+  const oppScore = isHome ? result.awayScore : result.homeScore;
+  const h2h = ensureH2H(state);
+  const rec = h2h[opponent.id] || {
+    opponentId: opponent.id, opponentName: opponent.name,
+    games: 0, wins: 0, losses: 0, ties: 0,
+    runsFor: 0, runsAgainst: 0, meetings: []
+  };
+  rec.opponentName = opponent.name;
+  rec.games++;
+  rec.runsFor += userScore;
+  rec.runsAgainst += oppScore;
+  if (userScore > oppScore) rec.wins++;
+  else if (userScore < oppScore) rec.losses++;
+  else rec.ties++;
+  rec.meetings = Array.isArray(rec.meetings) ? rec.meetings : [];
+  rec.meetings.unshift({
+    year: state.year, day: Math.max(1, state.day),
+    home: result.homeTeam.name, away: result.awayTeam.name,
+    userScore, oppScore
+  });
+  rec.meetings = rec.meetings.slice(0, 12);
+  h2h[opponent.id] = rec;
+}
+
+function getUserTeamH2H(opponentId) {
+  const rec = ensureH2H(STATE)[opponentId];
+  return rec || { opponentId, games: 0, wins: 0, losses: 0, ties: 0, runsFor: 0, runsAgainst: 0, meetings: [] };
+}
+
+function renderH2HCard(opponent, compact = false) {
+  const rec = getUserTeamH2H(opponent.id);
+  const card = el("div", { class: "card h2h-card" });
+  card.appendChild(el("h3", {}, `H2H — ${opponent.name}`));
+  if (!rec.games) {
+    card.appendChild(el("p", { class: "small-note" }, "No previous meetings recorded yet."));
+    return card;
+  }
+  const grid = el("div", { class: "stat-strip" }, [
+    statBox("Games", rec.games), statBox("W", rec.wins), statBox("L", rec.losses),
+    statBox("Runs", `${rec.runsFor}-${rec.runsAgainst}`)
+  ]);
+  card.appendChild(grid);
+  const recent = (rec.meetings || []).slice(0, compact ? 3 : 5);
+  const list = el("div", { style: "margin-top:10px;" });
+  for (const g of recent) {
+    const resultLabel = g.userScore > g.oppScore ? "W" : g.userScore < g.oppScore ? "L" : "T";
+    list.appendChild(el("div", { class: "log-line" },
+      `${g.year} Day ${g.day} — ${g.away} ${g.away === g.home ? "" : ""}${g.home === g.away ? "" : ""} — ${g.userScore}-${g.oppScore} (${resultLabel})`));
+  }
+  card.appendChild(list);
+  return card;
+}
+
+function renderGameDayView() {
+  const gv = GAME_VIEW;
+  const wrap = el("div");
+  if (!gv) {
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h2", {}, "Game Day"),
+      el("p", { class: "small-note" }, "No game in progress.")
+    ]));
+    return wrap;
+  }
+  if (gv.stage === "lineups") wrap.appendChild(renderStartingLineupsCard(gv));
+  else if (gv.stage === "live") wrap.appendChild(renderLiveGameCard(gv));
+  else wrap.appendChild(renderFinalLineupsCard(gv));
+  return wrap;
+}
+
+// ---- Stage 1: Starting Lineups ----
+function renderStartingLineupsCard(gv) {
+  const { result } = gv;
+  const card = el("div", { class: "card" });
+  card.appendChild(el("h2", {}, `${result.awayTeam.name} @ ${result.homeTeam.name}`));
+  card.appendChild(el("p", { class: "small-note" }, `${TEAM_NAME(result.homeTeam.id)} — ${stadiumCapacity((result.homeTeam.stadium || ""))} capacity · Starting lineups below.`));
+  const userTeamId = STATE.player && (STATE.player.teamId || STATE.player.orgId);
+  const opponent = result.homeTeam.id === userTeamId ? result.awayTeam : result.homeTeam;
+  if (opponent) card.appendChild(renderH2HCard(opponent, true));
+
+  const grid = el("div", { class: "grid-2" });
+  grid.appendChild(lineupColumn(result.awayTeam, result.awayLineup, result.awayStartingPitcher, STATE.player));
+  grid.appendChild(lineupColumn(result.homeTeam, result.homeLineup, result.homeStartingPitcher, STATE.player));
+  card.appendChild(grid);
+
+  const btnRow = el("div", { class: "btn-row" });
+  btnRow.appendChild(el("button", {
+    class: "btn amber",
+    onclick: () => { GAME_VIEW.stage = "live"; renderAll(); }
+  }, "Play Ball →"));
+  card.appendChild(btnRow);
+  return card;
+}
+
+function lineupColumn(team, lineupInfo, startingPitcher, userPlayer) {
+  const box = el("div");
+  box.appendChild(el("h3", {}, team.name));
+  box.appendChild(el("p", { class: "small-note" }, `Manager: ${lineupInfo.coach.name} — ${lineupInfo.coach.personality} (${COACH_PERSONALITIES[lineupInfo.coach.personality].desc})`));
+  const table = el("table", { class: "stat-table" });
+  table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
+  for (const slot of lineupInfo.order) {
+    const isUser = userPlayer && slot.player.id === userPlayer.id;
+    table.appendChild(el("tr", { style: isUser ? "color:var(--amber);font-weight:700;" : "" }, [
+      el("td", {}, String(slot.battingOrder)),
+      el("td", {}, slot.position),
+      el("td", {}, slot.player.name + (isUser ? " (You)" : "")),
+      el("td", {}, String(battingOverall(slot.player)))
+    ]));
+  }
+  box.appendChild(table);
+  const isUserPitching = userPlayer && startingPitcher.id === userPlayer.id;
+  box.appendChild(el("p", { class: "small-note", style: isUserPitching ? "color:var(--amber);font-weight:700;" : "" }, `Starting Pitcher: ${startingPitcher.name}${isUserPitching ? " (You)" : ""} — OVR ${pitchingOverall(startingPitcher)}`));
+  return box;
+}
+
+// Renders a classic line-score table: away/home team names down the side,
+// innings 1-9 (or more, for extras) across the top, plus R/H/E totals.
+// `revealedHalves` optionally caps it to only the half-innings played so
+// far (for the live view, so it doesn't spoil unplayed innings); omit it
+// to show the full completed game (final view).
+function renderLineScoreTable(result, revealedHalves) {
+  const log = revealedHalves != null ? result.game.log.slice(0, revealedHalves) : result.game.log;
+  const partialGame = { ...result.game, log };
+  const ls = buildLineScore(partialGame);
+  const table = el("table", { class: "stat-table linescore" });
+  const headRow = el("tr", {}, [
+    el("th", {}, ""),
+    ...ls.innings.map(n => el("th", {}, String(n))),
+    el("th", {}, "R"), el("th", {}, "H"), el("th", {}, "E")
+  ]);
+  table.appendChild(headRow);
+  const rowFor = (label, side) => el("tr", {}, [
+    el("td", { style: "text-align:left;font-weight:600;" }, label),
+    ...side.byInning.map(v => el("td", {}, v == null ? "" : String(v))),
+    el("td", { style: "font-weight:700;" }, String(side.R)),
+    el("td", {}, String(side.H)),
+    el("td", {}, String(side.E))
+  ]);
+  table.appendChild(rowFor(result.awayTeam.name.split(" ").pop(), ls.away));
+  table.appendChild(rowFor(result.homeTeam.name.split(" ").pop(), ls.home));
+  return table;
+}
+
+// ---- Stage 2: Live field view (pitch-by-pitch) ----
+// Plays the game one pitch at a time instead of one half-inning at a time.
+// gv.paIndex walks through result.game.pitchLog (one entry per plate
+// appearance, each already holding its full pitch sequence). gv.pitchIndex
+// tracks how many of the CURRENT PA's pitches have been thrown. Once a PA's
+// pitches are exhausted, "Next Pitch" reveals that PA's outcome and (if it
+// closed out the half-inning) locks the half-inning into the log board below,
+// mirroring exactly what the old half-inning-at-a-time view showed, just
+// arrived at one pitch at a time.
+function renderLiveGameCard(gv) {
+  const { result } = gv;
+  const log = result.game.log || [];
+  const pitchLog = result.game.pitchLog || [];
+  const totalHalves = log.length;
+  const totalPAs = pitchLog.length;
+  gv.paIndex = Math.min(gv.paIndex, totalPAs);
+  if (gv.paIndex >= totalPAs) { gv.finished = true; }
+
+  const card = el("div", { class: "card" });
+  card.appendChild(el("h2", {}, `${result.awayTeam.name} @ ${result.homeTeam.name}`));
+
+  // How many half-innings are FULLY complete given how many PAs we've played
+  // through live (used to decide what's locked into the log board vs. still
+  // "in progress" in the field diagram above it).
+  const currentPA = !gv.finished ? pitchLog[gv.paIndex] : null;
+  let revealedHalfInnings = 0;
+  if (currentPA) {
+    revealedHalfInnings = log.findIndex(h => h.inning === currentPA.inning && h.half === currentPA.half);
+    if (revealedHalfInnings < 0) revealedHalfInnings = totalHalves;
+  } else {
+    revealedHalfInnings = totalHalves;
+  }
+  gv.revealedHalfInnings = revealedHalfInnings;
+
+  const lastCompletedPA = gv.paIndex > 0 ? pitchLog[gv.paIndex - 1] : null;
+  const shownScore = lastCompletedPA ? lastCompletedPA.scoreAfter : { home: 0, away: 0 };
+  card.appendChild(el("div", { class: "stat-strip" }, [
+    statBox(result.awayTeam.name.split(" ").pop(), shownScore.away),
+    statBox(result.homeTeam.name.split(" ").pop(), shownScore.home)
+  ]));
+  const userTeamId = STATE.player && (STATE.player.teamId || STATE.player.orgId);
+  const liveOpponent = result.homeTeam.id === userTeamId ? result.awayTeam : result.homeTeam;
+  if (liveOpponent) card.appendChild(renderH2HCard(liveOpponent, true));
+  card.appendChild(renderLineScoreTable(result, revealedHalfInnings));
+
+  // Live field snapshot: the plate appearance currently being played out.
+  if (!gv.finished && currentPA) {
+    const currentHalf = log[revealedHalfInnings] || log[log.length - 1];
+    card.appendChild(renderFieldDiagram(currentHalf, currentPA, result, gv));
+  }
+
+  const boardWrap = el("div", { style: "margin-top:14px;" });
+  for (let i = 0; i < revealedHalfInnings; i++) {
+    const half = log[i];
+    const inningCard = el("div", { style: "margin-bottom:10px;" });
+    inningCard.appendChild(el("h3", {}, `${half.half === "top" ? "Top" : "Bottom"} ${half.inning}${half.runsThisHalf > 0 ? ` — ${half.runsThisHalf} run${half.runsThisHalf > 1 ? "s" : ""}` : ""}`));
+    const subsThisHalf = (result.game.subs || []).filter(s => s.inning === half.inning && s.half === half.half);
+    for (const sub of subsThisHalf) inningCard.appendChild(el("div", { class: "log-line", style: "color:var(--amber);" }, sub.description));
+    if (half.plays.length) {
+      for (const line of half.plays) inningCard.appendChild(el("div", { class: "log-line" }, line));
+    } else {
+      inningCard.appendChild(el("div", { class: "log-line" }, "(no plate appearances recorded)"));
+    }
+    boardWrap.appendChild(inningCard);
+  }
+  // Plays already resolved within the CURRENT (not-yet-locked) half-inning,
+  // so completed at-bats don't disappear while later ones in the same
+  // half-inning are still being played out pitch by pitch.
+  if (!gv.finished && currentPA) {
+    const currentHalf = log[revealedHalfInnings];
+    if (currentHalf) {
+      const paInHalfSoFar = pitchLog.slice(0, gv.paIndex).filter(x => x.inning === currentHalf.inning && x.half === currentHalf.half);
+      if (paInHalfSoFar.length) {
+        const inProgressCard = el("div", { style: "margin-bottom:10px;" });
+        inProgressCard.appendChild(el("h3", {}, `${currentHalf.half === "top" ? "Top" : "Bottom"} ${currentHalf.inning}`));
+        for (const pa of paInHalfSoFar) {
+          inProgressCard.appendChild(el("div", { class: "log-line" }, describePAResult(pa.batter, pa.result, pa.runsScored, pa.outsAfter)));
+        }
+        boardWrap.appendChild(inProgressCard);
+      }
+    }
+  }
+  card.appendChild(boardWrap);
+
+  const btnRow = el("div", { class: "btn-row" });
+  if (!gv.finished) {
+    const pitchesThrown = gv.pitchIndex;
+    const pitchesTotal = currentPA ? currentPA.pitches.length : 0;
+    const isMidPitch = pitchesThrown < pitchesTotal;
+    btnRow.appendChild(el("button", {
+      class: "btn amber",
+      onclick: () => advanceGamePitch()
+    }, isMidPitch ? "Next Pitch →" : "Result →"));
+    btnRow.appendChild(el("button", {
+      class: "btn secondary",
+      onclick: () => { GAME_VIEW.paIndex = totalPAs; GAME_VIEW.animPhase = null; GAME_VIEW.finished = true; renderAll(); }
+    }, "Sim Rest of Game"));
+  } else {
+    const winnerName = result.winner.name;
+    card.appendChild(el("p", { class: "small-note", style: "margin-top:10px;" }, `Final: ${result.awayTeam.name} ${result.awayScore} — ${result.homeTeam.name} ${result.homeScore}. ${winnerName} win.`));
+    btnRow.appendChild(el("button", {
+      class: "btn amber",
+      onclick: () => { GAME_VIEW.stage = "final"; renderAll(); }
+    }, "View Final Lineups →"));
+  }
+  card.appendChild(btnRow);
+  return card;
+}
+
+// Advances the live game by exactly one step: either reveals the next pitch
+// of the current at-bat (with a throw/swing animation), or - once every
+// pitch of the at-bat has been shown - resolves the at-bat's outcome and
+// moves on to the next plate appearance.
+function advanceGamePitch() {
+  const gv = GAME_VIEW;
+  if (!gv) return;
+  const pitchLog = gv.result.game.pitchLog || [];
+  const currentPA = pitchLog[gv.paIndex];
+  if (!currentPA) { gv.finished = true; renderAll(); return; }
+
+  if (gv.pitchIndex < currentPA.pitches.length) {
+    gv.pitchIndex++;
+    gv.animPhase = "pitching";
+    renderAll();
+    // Let the wind-up/throw/swing animation play out, then settle before
+    // the next click is meaningful again (mirrors a real pitch's pacing).
+    setTimeout(() => {
+      if (GAME_VIEW === gv) { gv.animPhase = "settled"; renderAll(); }
+    }, 650);
+  } else {
+    gv.animPhase = "outcome";
+    gv.paIndex++;
+    gv.pitchIndex = 0;
+    renderAll();
+    setTimeout(() => {
+      if (GAME_VIEW === gv) { gv.animPhase = null; renderAll(); }
+    }, 900);
+  }
+}
+
+// Renders an SVG diamond with runners on base, the pitcher/batter dots
+// (animated on each pitch thrown), the current batter/pitcher, the
+// ball-strike count, and the last-pitch speed/type. `gv` (the live
+// GAME_VIEW) drives which animation phase to show: a throw as gv.pitchIndex
+// pitches have been revealed, a swing/take following it, and — once the PA's
+// pitches run out — a flashed outcome banner (K, BB, hit, HR, out).
+function renderFieldDiagram(currentHalf, currentPA, result, gv) {
+  const box = el("div", { class: "field-diagram-wrap" });
+  const isOutcomePhase = gv && gv.animPhase === "outcome";
+  // Bases/outs as they stood entering this PA (i.e. before it's resolved):
+  // approximate with basesAfter of the previous PA in this half if available.
+  const pitchLog = result.game.pitchLog || [];
+  const paIdx = pitchLog.indexOf(currentPA);
+  const prevPA = paIdx > 0 ? pitchLog[paIdx - 1] : null;
+  const prevSameHalf = prevPA && prevPA.inning === currentPA.inning && prevPA.half === currentPA.half ? prevPA : null;
+  const displayBases = isOutcomePhase ? currentPA.basesAfter : (prevSameHalf ? prevSameHalf.basesAfter : [null, null, null]);
+  const displayOuts = isOutcomePhase ? currentPA.outsAfter : (prevSameHalf ? prevSameHalf.outsAfter : 0);
+  const p = STATE.player;
+
+  // SVG diamond: home at bottom, 1B right, 2B top, 3B left.
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 200 200");
+  svg.setAttribute("class", "field-diagram");
+  const diamondPts = "100,40 160,100 100,160 40,100";
+  const diamond = document.createElementNS(NS, "polygon");
+  diamond.setAttribute("points", diamondPts);
+  diamond.setAttribute("class", "field-diamond");
+  svg.appendChild(diamond);
+  const baseCoords = { 1: [160, 100], 2: [100, 40], 3: [40, 100] }; // 1B, 2B, 3B
+  for (const [num, [cx, cy]] of Object.entries(baseCoords)) {
+    const occupied = displayBases[Number(num) - 1];
+    const rect = document.createElementNS(NS, "rect");
+    rect.setAttribute("x", cx - 8); rect.setAttribute("y", cy - 8);
+    rect.setAttribute("width", 16); rect.setAttribute("height", 16);
+    rect.setAttribute("transform", `rotate(45 ${cx} ${cy})`);
+    rect.setAttribute("class", occupied ? "base occupied" : "base");
+    svg.appendChild(rect);
+  }
+  const home = document.createElementNS(NS, "rect");
+  home.setAttribute("x", 92); home.setAttribute("y", 152); home.setAttribute("width", 16); home.setAttribute("height", 16);
+  home.setAttribute("transform", "rotate(45 100 160)");
+  home.setAttribute("class", "base home");
+  svg.appendChild(home);
+
+  // Pitcher on the mound - nudges up/down on a throw.
+  const isThrowing = gv && gv.animPhase === "pitching";
+  const moundGroup = document.createElementNS(NS, "g");
+  if (isThrowing) moundGroup.setAttribute("class", "pitcher-wind");
+  const mound = document.createElementNS(NS, "circle");
+  mound.setAttribute("cx", 100); mound.setAttribute("cy", 108); mound.setAttribute("r", 6);
+  mound.setAttribute("class", "mound");
+  moundGroup.appendChild(mound);
+  const pitcherDot = document.createElementNS(NS, "circle");
+  pitcherDot.setAttribute("cx", 100); pitcherDot.setAttribute("cy", 108); pitcherDot.setAttribute("r", 4);
+  pitcherDot.setAttribute("class", "pitcher-dot");
+  moundGroup.appendChild(pitcherDot);
+  svg.appendChild(moundGroup);
+
+  // Batter's box dot near home plate.
+  const batterDot = document.createElementNS(NS, "circle");
+  batterDot.setAttribute("cx", 116); batterDot.setAttribute("cy", 150); batterDot.setAttribute("r", 4);
+  batterDot.setAttribute("class", "batter-dot");
+  svg.appendChild(batterDot);
+
+  // The pitch itself: a small ball that flies from the mound toward the
+  // plate whenever a new pitch is thrown (re-triggered each render by
+  // recreating the element, since CSS animations only replay on insertion).
+  if (isThrowing) {
+    const ball = document.createElementNS(NS, "circle");
+    ball.setAttribute("cx", 100); ball.setAttribute("cy", 108); ball.setAttribute("r", 3.5);
+    ball.setAttribute("class", "pitch-ball throwing");
+    svg.appendChild(ball);
+  }
+
+  // Bat swing flash near the batter's box, timed to land just after the
+  // pitch arrives (see .bat-swing animation-delay in CSS).
+  if (isThrowing) {
+    const bat = document.createElementNS(NS, "line");
+    bat.setAttribute("x1", 116); bat.setAttribute("y1", 150);
+    bat.setAttribute("x2", 132); bat.setAttribute("y2", 150);
+    bat.setAttribute("stroke", "var(--chalk)");
+    bat.setAttribute("stroke-width", "3");
+    bat.setAttribute("stroke-linecap", "round");
+    bat.setAttribute("class", "bat-swing swinging");
+    svg.appendChild(bat);
+  }
+
+  box.appendChild(svg);
+
+  const infoWrap = el("div", { style: "min-width:160px;" });
+
+  // Outcome banner - flashes the plate appearance's result once its pitches
+  // have all been shown.
+  if (isOutcomePhase) {
+    const r = currentPA.result;
+    const kind = r === "HR" ? "hr" : r === "BB" ? "bb" : (r === "SO" || r === "OUT") ? "out" : "hit";
+    const label = describePAResult(currentPA.batter, r, currentPA.runsScored, currentPA.outsAfter);
+    infoWrap.appendChild(el("div", { class: `pa-outcome-flash ${kind} show` }, label));
+  }
+
+  const info = el("div", { class: "field-info" });
+  const battingLabel = currentPA ? currentPA.batter.name : "—";
+  const pitchingLabel = currentPA ? currentPA.pitcher.name : "—";
+  const isBatterUser = p && currentPA && currentPA.batter.id === p.id;
+  const isPitcherUser = p && currentPA && currentPA.pitcher.id === p.id;
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "At Bat"),
+    el("span", { style: isBatterUser ? "color:var(--amber);font-weight:700;" : "" }, battingLabel + (isBatterUser ? " (You)" : ""))
+  ]));
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "Pitching"),
+    el("span", { style: isPitcherUser ? "color:var(--amber);font-weight:700;" : "" }, pitchingLabel + (isPitcherUser ? " (You)" : ""))
+  ]));
+  const pitchesShown = gv ? gv.pitchIndex : (currentPA ? currentPA.pitches.length : 0);
+  const lastPitch = currentPA && currentPA.pitches && pitchesShown > 0 ? currentPA.pitches[pitchesShown - 1] : null;
+  if (lastPitch) {
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Count"),
+      el("span", {}, `${lastPitch.balls}-${lastPitch.strikes}`)
+    ]));
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Pitch"),
+      el("span", {}, `${lastPitch.type}, ${lastPitch.mph} mph`)
+    ]));
+  } else {
+    info.appendChild(el("div", { class: "field-info-row" }, [
+      el("span", { class: "field-info-lbl" }, "Count"),
+      el("span", {}, "0-0")
+    ]));
+  }
+  info.appendChild(el("div", { class: "field-info-row" }, [
+    el("span", { class: "field-info-lbl" }, "Outs"),
+    el("span", {}, String(displayOuts))
+  ]));
+  infoWrap.appendChild(info);
+  box.appendChild(infoWrap);
+  return box;
+}
+
 
 function renderGameDayView() {
   const gv = GAME_VIEW;
@@ -1710,6 +2352,9 @@ function renderFinalLineupsCard(gv) {
   card.appendChild(el("p", { class: "small-note" }, `Final: ${result.awayTeam.name} ${result.awayScore} — ${result.homeTeam.name} ${result.homeScore}. ${result.winner.name} win.`));
   card.appendChild(renderLineScoreTable(result));
   card.appendChild(el("p", { class: "small-note" }, `W: ${result.winningPitcher.name} · L: ${result.losingPitcher.name}`));
+  const userTeamId = STATE.player && (STATE.player.teamId || STATE.player.orgId);
+  const finalOpponent = result.homeTeam.id === userTeamId ? result.awayTeam : result.homeTeam;
+  if (finalOpponent) card.appendChild(renderH2HCard(finalOpponent, false));
 
   const potg = pickPlayerOfTheGame(result);
   if (potg) {

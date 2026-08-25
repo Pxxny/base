@@ -45,29 +45,103 @@ function renderSaveView() {
 }
 
 // ---- localStorage save/load ----
-function doSave() {
+// Saves can become large because teams/rosters contain many player objects.
+// allTeams is only a convenience array (the canonical copy is teams), and
+// the current schedule is regenerated/unused by the season loop. Strip those
+// duplicated/transient fields, then gzip when the browser supports it.
+function compactStateForSave(state) {
+  const copy = JSON.parse(JSON.stringify(state, (key, value) => {
+    if (key === "allTeams" || key === "schedule" || key === "scheduleIndex") return undefined;
+    return value;
+  }));
+  copy.saveVersion = 3;
+  copy.savedAt = new Date().toISOString();
+  return copy;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function gzipString(text) {
+  if (!window.CompressionStream) return null;
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+  const buf = await new Response(stream).arrayBuffer();
+  return bytesToBase64(new Uint8Array(buf));
+}
+async function gunzipBase64(base64) {
+  if (!window.DecompressionStream) return null;
+  const bytes = base64ToBytes(base64);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return await new Response(stream).text();
+}
+
+function restoreLoadedState(parsed) {
+  // Rebuild the convenience array that old code expects without duplicating
+  // it in the saved payload.
+  if (!parsed.allTeams && parsed.teams) parsed.allTeams = Object.values(parsed.teams);
+  if (!parsed.schedule) parsed.schedule = [];
+  if (parsed.scheduleIndex == null) parsed.scheduleIndex = 0;
+  parsed.rivalries ||= {};
+  parsed.transactionLog ||= [];
+  parsed.tradeOffers ||= [];
+  parsed.waiverClaims ||= [];
+  parsed.freeAgentPool ||= [];
+  parsed.h2h ||= {};
+  return parsed;
+}
+
+async function doSave() {
   try {
-    const json = serializeState(STATE);
-    localStorage.setItem(SAVE_KEY, json);
-    toast("Career saved.");
+    const json = JSON.stringify(compactStateForSave(STATE));
+    const compressed = await gzipString(json);
+    const payload = compressed ? "GZ1:" + compressed : "JS1:" + json;
+    try {
+      localStorage.setItem(SAVE_KEY, payload);
+    } catch (e) {
+      // Last-resort recovery: remove only our own older save, then retry once.
+      if (e && (e.name === "QuotaExceededError" || /quota/i.test(e.message || ""))) {
+        localStorage.removeItem(SAVE_KEY);
+        localStorage.setItem(SAVE_KEY, payload);
+      } else throw e;
+    }
+    const kb = Math.round(payload.length / 1024);
+    toast(`Career saved (${kb} KB).`);
   } catch (e) {
-    toast("Save failed: " + e.message);
+    console.error("Save failed", e);
+    toast("Save failed: " + (e.message || e));
   }
 }
 
-function doLoad() {
+async function doLoad() {
   try {
-    const json = localStorage.getItem(SAVE_KEY);
-    if (json) {
-      STATE = deserializeState(json);
-      ACTIVE_TAB = "career";
-      toast("Career loaded.");
-      renderAll();
-    } else {
+    const payload = localStorage.getItem(SAVE_KEY);
+    if (!payload) {
       toast("No saved career found.");
+      return;
     }
+    let json;
+    if (payload.startsWith("GZ1:")) json = await gunzipBase64(payload.slice(4));
+    else if (payload.startsWith("JS1:")) json = payload.slice(4);
+    else json = payload; // backward compatibility with the old plain JSON save
+    STATE = restoreLoadedState(deserializeState(json));
+    ACTIVE_TAB = "career";
+    toast("Career loaded.");
+    renderAll();
   } catch (e) {
-    toast("Load failed: " + e.message);
+    console.error("Load failed", e);
+    toast("Load failed: " + (e.message || e));
   }
 }
 

@@ -116,8 +116,15 @@ function simDay(state) {
     const shuffled = [...teams].sort(() => Math.random() - 0.5);
     for (let i = 0; i < shuffled.length - 1; i += 2) {
       const home = shuffled[i], away = shuffled[i + 1];
-      const result = simulateGame(home, away, { recordLog: false });
+      const userTeamId = state.player ? (state.player.teamId || state.player.orgId) : null;
+      const isUserGame = !!userTeamId && (home.id === userTeamId || away.id === userTeamId);
+      const userOpp = isUserGame ? (home.id === userTeamId ? away : home) : null;
+      const rivalry = isUserGame && state.player && !isPitcher(state.player.position) ? rivalryModifierForGame(state, state.teams[userTeamId], userOpp) : null;
+      if (rivalry) rivalry.pitcherEffects = Object.fromEntries(Object.values(state.rivalries || {}).filter(r => r.kind === "pitcher").map(r => [r.id, clamp((r.redemption || 0) - (r.pressure || 0), -12, 12)]));
+      const result = simulateGame(home, away, { recordLog: false, rivalry });
       commitGameStats(result);
+      updateUserRivalries(state, result);
+      if (typeof recordUserTeamH2H === "function") recordUserTeamH2H(state, result);
       trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
@@ -127,6 +134,7 @@ function simDay(state) {
     }
   }
   state.day++;
+  processTransactions(state);
   // advance injuries
   for (const t of state.allTeams) for (const p of t.roster) advanceInjuryDays(p);
   if (state.player) { advanceInjuryDays(state.player); recoverFatigue(state.player); }
@@ -152,8 +160,13 @@ function simDayWithUserGame(state) {
     for (let i = 0; i < shuffled.length - 1; i += 2) {
       const home = shuffled[i], away = shuffled[i + 1];
       const isUserGame = userTeamId && (home.id === userTeamId || away.id === userTeamId);
-      const result = simulateGame(home, away, { recordLog: isUserGame });
+      const userOpp = isUserGame ? (home.id === userTeamId ? away : home) : null;
+      const rivalry = isUserGame && state.player && !isPitcher(state.player.position) ? rivalryModifierForGame(state, state.teams[userTeamId], userOpp) : null;
+      if (rivalry) rivalry.pitcherEffects = Object.fromEntries(Object.values(state.rivalries || {}).filter(r => r.kind === "pitcher").map(r => [r.id, clamp((r.redemption || 0) - (r.pressure || 0), -12, 12)]));
+      const result = simulateGame(home, away, { recordLog: isUserGame, rivalry });
       commitGameStats(result);
+      updateUserRivalries(state, result);
+      if (typeof recordUserTeamH2H === "function") recordUserTeamH2H(state, result);
       trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
@@ -163,6 +176,7 @@ function simDayWithUserGame(state) {
     }
   }
   state.day++;
+  processTransactions(state);
   for (const t of state.allTeams) for (const p of t.roster) advanceInjuryDays(p);
   if (state.player) { advanceInjuryDays(state.player); recoverFatigue(state.player); }
   return { results, userGameResult };
