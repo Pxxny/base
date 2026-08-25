@@ -15,6 +15,7 @@ const TABS = [
   { id: "career", label: "CAREER" },
   { id: "roster", label: "ROSTER" },
   { id: "coach", label: "COACH" },
+  { id: "manager", label: "MANAGER" },
   { id: "training", label: "TRAINING" },
   { id: "stats", label: "STATS" },
   { id: "standings", label: "STANDINGS" },

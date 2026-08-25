@@ -284,9 +284,16 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
   const homeStartingPitcher = homePitcher;
   const awayStartingPitcher = awayPitcher;
   const matchupFor = (batter, pitchingTeam) => {
-    if (!opts.rivalry) return null;
-    const pitcherEffect = opts.rivalry.pitcherEffects?.[pitchingTeam === homeTeam ? (homePitcher?.id) : (awayPitcher?.id)] || 0;
-    return { ...opts.rivalry, batterId: batter.id, clutch: (opts.rivalry.clutch || 0) + pitcherEffect };
+    const rivalry = opts.rivalry || {};
+    const manager = (typeof STATE !== "undefined" && STATE?.manager?.active && STATE.manager.role === "Manager") ? STATE.manager : null;
+    const battingTeam = pitchingTeam === homeTeam ? awayTeam : homeTeam;
+    let strategyClutch = 0;
+    if (manager && manager.teamId === battingTeam.id) {
+      strategyClutch = ({"Aggressive":1.0,"Small Ball":0.8,"Power":1.2,"Pitching & Defense":0.3,"Development":-0.2,"Balanced":0.5}[manager.strategy] || 0);
+    }
+    const pitcherEffect = rivalry.pitcherEffects?.[pitchingTeam === homeTeam ? (homePitcher?.id) : (awayPitcher?.id)] || 0;
+    if (!opts.rivalry && !manager) return null;
+    return { ...rivalry, batterId: batter.id, clutch: (rivalry.clutch || 0) + pitcherEffect + strategyClutch };
   };
   const pitchCounts = new Map();
   const bumpPitchCount = (p, n) => pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);

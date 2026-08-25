@@ -102,6 +102,8 @@ function userTrustBonus(team) {
 // filling remaining slots by best-available if a team is short-handed.
 // Returns { coach, order: [{ player, battingOrder, position }] }
 function buildLineup(team) {
+  const managerChoice = (typeof managerLineupForTeam === "function") ? managerLineupForTeam(team) : null;
+  if (managerChoice) return managerChoice;
   const coach = getTeamCoach(team);
   const personality = COACH_PERSONALITIES[coach.personality];
   const healthy = (team.roster || []).filter(p => !isPitcher(p.position) && p.health.status === "Healthy");

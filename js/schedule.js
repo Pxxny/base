@@ -94,6 +94,116 @@ function todaysMatchupGroups(state) {
   return groups;
 }
 
+// ------------------------------------------------------------
+// REALISTIC SERIES SCHEDULER
+// ------------------------------------------------------------
+// Teams should normally meet in a series instead of drawing a brand-new
+// opponent every day. Regular season uses 3-game series. Postseason uses
+// 5-game series (first to 3 wins). The same series remains together across
+// consecutive simulation days, which also makes H2H, pitcher usage and
+// rivalry narratives feel much more natural.
+function seriesLengthForGroup(state, teams) {
+  const isPostseason = !!(state.postseason || state.seasonPhase === "postseason" || state.phase === "postseason");
+  return isPostseason ? 5 : 3;
+}
+
+function seriesKey(a, b) { return [String(a), String(b)].sort().join("::"); }
+
+function ensureSeriesState(state) {
+  if (!state.seriesState) state.seriesState = { active: {}, history: [] };
+  return state.seriesState;
+}
+
+function makeSeriesForGroup(state, teams) {
+  if (!teams || teams.length < 2) return [];
+  const pool = [...teams].sort(() => Math.random() - 0.5);
+  const out = [];
+  for (let i = 0; i + 1 < pool.length; i += 2) {
+    const home = pool[i], away = pool[i + 1];
+    const length = seriesLengthForGroup(state, teams);
+    out.push({
+      key: seriesKey(home.id, away.id),
+      home: home.id,
+      away: away.id,
+      length,
+      game: 1,
+      wins: { [home.id]: 0, [away.id]: 0 },
+      completed: false
+    });
+  }
+  return out;
+}
+
+function getDailySeriesMatchups(state) {
+  const ss = ensureSeriesState(state);
+  const matchups = [];
+  const groups = todaysMatchupGroups(state);
+
+  for (const teams of groups) {
+    const groupIds = new Set(teams.map(t => t.id));
+    const active = Object.values(ss.active).filter(s =>
+      !s.completed && groupIds.has(s.home) && groupIds.has(s.away)
+    );
+
+    const used = new Set();
+    for (const s of active) {
+      const home = state.allTeams.find(t => t.id === s.home);
+      const away = state.allTeams.find(t => t.id === s.away);
+      if (!home || !away) continue;
+      matchups.push({ home, away, series: s });
+      used.add(home.id); used.add(away.id);
+      s.game++;
+      s.gamesPlayed = (s.gamesPlayed || 0) + 1;
+    }
+
+    // Fill remaining teams with new series. A series is three games in the
+    // regular season and five games in the postseason.
+    const remaining = teams.filter(t => !used.has(t.id)).sort(() => Math.random() - 0.5);
+    for (let i = 0; i + 1 < remaining.length; i += 2) {
+      const home = remaining[i], away = remaining[i + 1];
+      const length = seriesLengthForGroup(state, teams);
+      const s = {
+        key: seriesKey(home.id, away.id),
+        home: home.id,
+        away: away.id,
+        length,
+        game: 1,
+        gamesPlayed: 0,
+        wins: { [home.id]: 0, [away.id]: 0 },
+        completed: false
+      };
+      ss.active[s.key] = s;
+      matchups.push({ home, away, series: s });
+    }
+  }
+  return matchups;
+}
+
+function recordSeriesResult(state, result, series) {
+  if (!series || !result) return;
+  const winnerId = result.winner && result.winner.id;
+  if (winnerId && series.wins[winnerId] != null) series.wins[winnerId]++;
+
+  const winner = Object.keys(series.wins).sort((a, b) => series.wins[b] - series.wins[a])[0];
+  if ((series.gamesPlayed || 0) >= series.length) {
+    series.completed = true;
+    series.winner = winner;
+    const ss = ensureSeriesState(state);
+    ss.history.push({
+      key: series.key,
+      home: series.home,
+      away: series.away,
+      length: series.length,
+      wins: { ...series.wins },
+      winner,
+      gamesPlayed: series.gamesPlayed || series.length,
+      day: state.day
+    });
+    delete ss.active[series.key];
+  }
+}
+
+
 // True once the current season has run its full schedule length for
 // whatever level the player is at. Defined here defensively (career.js,
 // which owns the real seasonLengthDaysForPlayer(), loads after this
@@ -105,6 +215,7 @@ function seasonHasEnded(state) {
 }
 
 function simDay(state) {
+  if (typeof managerDailyUpdate === "function") managerDailyUpdate(state);
   // Simulate one day across all leagues (majors + every named minor
   // league): every team plays if scheduled. Refuses to run - and so
   // never increments state.day - once the season has already played
@@ -112,10 +223,8 @@ function simDay(state) {
   // (past 365/366+) because nothing ever stopped it here.
   if (seasonHasEnded(state)) return [];
   const results = [];
-  for (const teams of todaysMatchupGroups(state)) {
-    const shuffled = [...teams].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < shuffled.length - 1; i += 2) {
-      const home = shuffled[i], away = shuffled[i + 1];
+  for (const matchup of getDailySeriesMatchups(state)) {
+      const home = matchup.home, away = matchup.away;
       const userTeamId = state.player ? (state.player.teamId || state.player.orgId) : null;
       const isUserGame = !!userTeamId && (home.id === userTeamId || away.id === userTeamId);
       const userOpp = isUserGame ? (home.id === userTeamId ? away : home) : null;
@@ -128,10 +237,10 @@ function simDay(state) {
       trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
+      recordSeriesResult(state, result, matchup.series);
       // random injuries for participants
       for (const line of result.game.lines.values()) maybeRandomInjury(line.player);
       results.push(result);
-    }
   }
   state.day++;
   processTransactions(state);
@@ -155,10 +264,8 @@ function simDayWithUserGame(state) {
   let userGameResult = null;
   const userTeamId = state.player ? (state.player.teamId || state.player.orgId) : null;
 
-  for (const teams of todaysMatchupGroups(state)) {
-    const shuffled = [...teams].sort(() => Math.random() - 0.5);
-    for (let i = 0; i < shuffled.length - 1; i += 2) {
-      const home = shuffled[i], away = shuffled[i + 1];
+  for (const matchup of getDailySeriesMatchups(state)) {
+      const home = matchup.home, away = matchup.away;
       const isUserGame = userTeamId && (home.id === userTeamId || away.id === userTeamId);
       const userOpp = isUserGame ? (home.id === userTeamId ? away : home) : null;
       const rivalry = isUserGame && state.player && !isPitcher(state.player.position) ? rivalryModifierForGame(state, state.teams[userTeamId], userOpp) : null;
@@ -170,10 +277,10 @@ function simDayWithUserGame(state) {
       trackBenchedIfApplicable(state, result);
       result.winner.wins++;
       result.loser.losses++;
+      recordSeriesResult(state, result, matchup.series);
       for (const line of result.game.lines.values()) maybeRandomInjury(line.player);
       results.push(result);
       if (isUserGame) userGameResult = result;
-    }
   }
   state.day++;
   processTransactions(state);

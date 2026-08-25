@@ -110,7 +110,8 @@ function newGameState() {
     freeAgentPool: [],
     transactionLog: [],
     transactionState: { lastTradeDay: 0, lastWaiverDay: 0, lastFAActionDay: 0 },
-    h2h: {}
+    h2h: {},
+    manager: { active: false, role: null, teamId: null, experienceYears: 0, experienceDays: 0, reputation: 35, strategy: "Balanced", lineupIds: [], lineupPositions: {}, draftBoard: [], prospectPool: [], transactions: [], awards: [], fired: false, jobHistory: [] }
   };
 }
 
@@ -1217,7 +1218,7 @@ function renderAwardsView() {
 function screenTab(tab) {
   const wrap = el("div");
   if (tab === "gameday") { wrap.appendChild(renderGameDayView()); }
-  else if (tab === "career") { wrap.appendChild(renderPlayerCard(STATE.player)); wrap.appendChild(renderSimControls()); wrap.appendChild(renderRivalryTransactions()); wrap.appendChild(renderRecentLog()); wrap.appendChild(renderAttributeCard(STATE.player)); }
+  else if (tab === "career") { wrap.appendChild(renderPlayerCard(STATE.player)); if (typeof ensureManagerState === "function") { const m=ensureManagerState(STATE); if (m.active) wrap.appendChild(el("div",{class:"card"},[el("h3",{},`Coaching Career: ${m.role}`),el("p",{class:"small-note"},`Reputation ${Math.round(m.reputation)}/100 · ${m.experienceYears} years experience.`)])); } wrap.appendChild(renderSimControls()); wrap.appendChild(renderRivalryTransactions()); wrap.appendChild(renderRecentLog()); wrap.appendChild(renderAttributeCard(STATE.player)); }
   else if (tab === "roster") wrap.appendChild(renderRosterView());
   else if (tab === "coach") wrap.appendChild(renderCoachView());
   else if (tab === "training") wrap.appendChild(renderTrainingView());
