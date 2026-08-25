@@ -77,13 +77,13 @@ function battingStatTable(rows) {
 }
 function pitchingStatTable(rows) {
   const table = el("table", { class: "stat-table" });
-  table.appendChild(el("tr", {}, ["", "G", "IP", "W", "L", "SV", "H", "BB", "SO", "ERA", "WHIP"].map(h => el("th", {}, h))));
+  table.appendChild(el("tr", {}, ["", "G", "GS", "IP", "W", "L", "SV", "HLD", "H", "BB", "SO", "ERA", "WHIP"].map(h => el("th", {}, h))));
   for (const { label, s } of rows) {
     const stats = s || {};
     const r = pitchingRates({ IP: Number(stats.IP) || 0, ER: Number(stats.ER) || 0, BB: Number(stats.BB) || 0, H: Number(stats.H) || 0 });
     table.appendChild(el("tr", {}, [
-      el("td", {}, String(label)), el("td", {}, numFmt(stats.G)), el("td", {}, numFmt(stats.IP, 1)), el("td", {}, numFmt(stats.W)), el("td", {}, numFmt(stats.L)),
-      el("td", {}, numFmt(stats.SV)), el("td", {}, numFmt(stats.H)), el("td", {}, numFmt(stats.BB)), el("td", {}, numFmt(stats.SO)),
+      el("td", {}, String(label)), el("td", {}, numFmt(stats.G)), el("td", {}, numFmt(stats.GS)), el("td", {}, numFmt(stats.IP, 1)), el("td", {}, numFmt(stats.W)), el("td", {}, numFmt(stats.L)),
+      el("td", {}, numFmt(stats.SV)), el("td", {}, numFmt(stats.HLD)), el("td", {}, numFmt(stats.H)), el("td", {}, numFmt(stats.BB)), el("td", {}, numFmt(stats.SO)),
       el("td", {}, numFmt(r.ERA, 2)), el("td", {}, numFmt(r.WHIP, 2))
     ]));
   }

@@ -134,6 +134,7 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
       stats.AB++; stats.SO++;
       if (pstats) pstats.SO++;
       game.outs[battingTeamKey]++;
+      if (pstats) pstats.outs++;
       break;
     case "BB":
       stats.BB++;
@@ -151,6 +152,7 @@ function applyPAResult(game, battingTeamKey, batter, pitcher, result, inning) {
     case "OUT":
       stats.AB++;
       game.outs[battingTeamKey]++;
+      if (pstats) pstats.outs++;
       // occasionally advance a runner (sac-like), simplified: 15% chance runner on 3rd scores
       if (bases[2] && Math.random() < 0.35 && game.outs[battingTeamKey] <= 2) {
         runs++; scorers.push(bases[2]); bases[2] = null;
@@ -212,15 +214,21 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     lob: { home: 0, away: 0 },
     lines: new Map(),
     pitcherLines: new Map(),
-    log: [], // array of { inning, half: "top"|"bottom", plays: [string], runsThisHalf, scoreAfter: {home,away} }
-    pitchLog: [], // array of per-PA snapshots for the live game-day view (see below)
-    subs: [], // array of { inning, half, kind: "pitching"|"batting", team: "home"|"away", outPlayer, inPlayer, note, description }
+    pitcherUsage: new Map(),
+    log: [],
+    pitchLog: [],
+    subs: [],
     playerLine(p) {
       if (!this.lines.has(p.id)) this.lines.set(p.id, { player: p, PA: 0, AB: 0, H: 0, "1B": 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, R: 0, BB: 0, SO: 0, SB: 0 });
       return this.lines.get(p.id);
     },
     pitcherLine(p) {
-      if (!this.pitcherLines.has(p.id)) this.pitcherLines.set(p.id, { player: p, outs: 0, H: 0, ER: 0, BB: 0, SO: 0, BF: 0 });
+      if (!this.pitcherLines.has(p.id)) {
+        this.pitcherLines.set(p.id, {
+          player: p, outs: 0, H: 0, ER: 0, BB: 0, SO: 0, BF: 0,
+          W: 0, L: 0, SV: 0, HLD: 0
+        });
+      }
       return this.pitcherLines.get(p.id);
     }
   };
@@ -229,51 +237,174 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
   const awayLineupInfo = buildLineup(awayTeam);
   const homeLineup = homeLineupInfo.order.map(o => o.player);
   const awayLineup = awayLineupInfo.order.map(o => o.player);
+
+  // Realistic pitcher roles. Older saves may not have bullpenRole, so infer it
+  // from the existing SP/RP/CP position field.
+  const roleOf = (p) => {
+    if (!p) return "Middle Relief";
+    if (p.position === "SP") return "Starter";
+    if (p.position === "CP") return "Closer";
+    return p.bullpenRole || p.role || "Middle Relief";
+  };
+  const bullpenOptionsBySituation = (team, currentPitcher, inning, isHomeSide) => {
+    const own = isHomeSide ? game.score.home : game.score.away;
+    const opp = isHomeSide ? game.score.away : game.score.home;
+    const diff = own - opp;
+    const opts = bullpenOptions(team, currentPitcher.id).filter(p => p.health.status === "Healthy");
+    if (!opts.length) return [];
+
+    let preferredRoles = [];
+    if (inning >= 9 && diff > 0 && diff <= 3) preferredRoles = ["Closer", "Setup", "Middle Relief"];
+    else if (inning >= 7 && diff > 0 && diff <= 3) preferredRoles = ["Setup", "Closer", "Middle Relief"];
+    else if (inning >= 7 && diff === 0) preferredRoles = ["Setup", "Closer", "Middle Relief"];
+    else if (inning >= 6 && diff < 0) preferredRoles = ["Setup", "Closer", "Middle Relief"];
+    else preferredRoles = ["Middle Relief", "Setup", "Closer"];
+
+    const roleRank = p => preferredRoles.indexOf(roleOf(p));
+    return opts.sort((a, b) => {
+      const rr = roleRank(a) - roleRank(b);
+      if (rr) return rr;
+      return pitchingOverall(b) - pitchingOverall(a);
+    });
+  };
+
   let homePitcher = pickStartingPitcher(homeTeam);
   let awayPitcher = pickStartingPitcher(awayTeam);
-  const homeStartingPitcher = homePitcher, awayStartingPitcher = awayPitcher;
-
-  // Track simple pitch-count fatigue so starters occasionally get pulled
-  // for a reliever in a long outing, purely for game-day flavor/realism.
-  const pitchCounts = new Map([[homePitcher.id, 0], [awayPitcher.id, 0]]);
+  const homeStartingPitcher = homePitcher;
+  const awayStartingPitcher = awayPitcher;
+  const pitchCounts = new Map();
   const bumpPitchCount = (p, n) => pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);
 
-  function maybeRelieve(team, currentPitcher, inning, isHomeSide) {
-    const staminaAttr = currentPitcher.pitching ? currentPitcher.pitching.stamina : 50;
-    const fatigueThreshold = 60 + staminaAttr * 0.6; // pitches before fatigue risk ramps up
-    const count = pitchCounts.get(currentPitcher.id) || 0;
-    if (inning < 5 || count < fatigueThreshold) return currentPitcher;
-    const overBy = count - fatigueThreshold;
-    const chance = clamp(overBy * 0.03, 0, 0.5);
-    if (Math.random() > chance) return currentPitcher;
-    const options = bullpenOptions(team, currentPitcher.id);
-    if (!options.length) return currentPitcher;
-    const reliever = pick(options.slice(0, Math.max(1, Math.ceil(options.length / 2))));
-    pitchCounts.set(reliever.id, 0);
-    if (recordLog) {
-      const desc = describeSub("pitching", currentPitcher, reliever, `${count} pitches thrown`);
-      game.subs.push({ inning, half: isHomeSide ? "bottom" : "top", kind: "pitching", team: isHomeSide ? "home" : "away", outPlayer: currentPitcher, inPlayer: reliever, note: `${count} pitches thrown`, description: desc });
+  function registerAppearance(p, teamKey, inning, half) {
+    if (!game.pitcherUsage.has(p.id)) {
+      game.pitcherUsage.set(p.id, {
+        player: p, team: teamKey, role: roleOf(p), firstInning: inning,
+        lastInning: inning, half, started: p.id === (teamKey === "home" ? homeStartingPitcher.id : awayStartingPitcher.id),
+        enteredWithLead: false, enteredScoreDiff: 0, saveSituation: false,
+        finished: false
+      });
     }
-    return reliever;
+    const u = game.pitcherUsage.get(p.id);
+    u.lastInning = inning;
+    u.half = half;
+    if (u.firstInning === inning && u.firstHalf === undefined) u.firstHalf = half;
+    const isHome = teamKey === "home";
+    if (u.firstInning === inning && u._entryRecorded !== true) {
+      u.enteredScoreDiff = isHome ? game.score.home - game.score.away : game.score.away - game.score.home;
+      u.enteredWithLead = u.enteredScoreDiff > 0;
+      u._entryRecorded = true;
+    }
+    return u;
+  }
+
+  function isSaveSituation(isHomeSide, inning, diff) {
+    // MLB save situation: pitcher is the finishing pitcher, team is ahead,
+    // tying run is on deck/base/plate, or the lead is <=3, or the pitcher
+    // works 3+ innings. We use the score/inning state here; the 3+ IP case
+    // is finalized from actual outs below.
+    return diff > 0 && (diff <= 3 || inning >= 7);
+  }
+
+  function shouldReplace(team, currentPitcher, inning, isHomeSide) {
+    const count = pitchCounts.get(currentPitcher.id) || 0;
+    const pLine = game.pitcherLine(currentPitcher);
+    const ip = pLine.outs / 3;
+    const role = roleOf(currentPitcher);
+    const own = isHomeSide ? game.score.home : game.score.away;
+    const opp = isHomeSide ? game.score.away : game.score.home;
+    const diff = own - opp;
+
+    // Starters are normally allowed to work through the first five.
+    if (role === "Starter") {
+      if (inning < 5) return false;
+      const stamina = currentPitcher.pitching ? currentPitcher.pitching.stamina : 50;
+      const threshold = 82 + stamina * 0.35;
+      if (count >= threshold) return true;
+      // Late-game leverage: don't automatically remove a good starter, but
+      // strongly favor the bullpen after six when the pitch count is high.
+      if (inning >= 7 && count >= 78) return true;
+      if (inning >= 6 && count >= 92) return true;
+      // A starter who has been hit hard is more likely to be removed.
+      if (ip >= 4 && pLine.ER >= 4) return true;
+      return false;
+    }
+
+    // Relievers normally get at least one inning unless the game is in a
+    // critical spot or they have clearly reached a pitch/fatigue limit.
+    if (inning <= 5 && count < 28) return false;
+    if (inning >= 9 && role === "Closer" && diff > 0 && diff <= 3) return false;
+    if (count >= 28) return true;
+    if (inning >= 8 && role === "Middle Relief" && diff > 0 && count >= 12) return true;
+    if (inning >= 8 && role === "Setup" && diff > 0 && diff <= 3 && count >= 20) return true;
+    return false;
+  }
+
+  function maybeRelieve(team, currentPitcher, inning, isHomeSide, forceLate = false) {
+    if (!currentPitcher) return currentPitcher;
+    if (!forceLate && !shouldReplace(team, currentPitcher, inning, isHomeSide)) return currentPitcher;
+    const options = bullpenOptionsBySituation(team, currentPitcher, inning, isHomeSide);
+    if (!options.length) return currentPitcher;
+
+    // Avoid repeatedly swapping fresh relievers just because the inning is
+    // late. The closer is normally reserved for a save situation.
+    const own = isHomeSide ? game.score.home : game.score.away;
+    const opp = isHomeSide ? game.score.away : game.score.home;
+    const diff = own - opp;
+    const candidate = options.find(p => {
+      const r = roleOf(p);
+      if (r === "Closer") return inning >= 8 && diff > 0 && diff <= 3;
+      return true;
+    }) || options[0];
+
+    if (candidate.id === currentPitcher.id) return currentPitcher;
+    pitchCounts.set(candidate.id, 0);
+    registerAppearance(candidate, isHomeSide ? "home" : "away", inning, isHomeSide ? "bottom" : "top");
+
+    if (recordLog) {
+      const count = pitchCounts.get(currentPitcher.id) || 0;
+      const note = `${roleOf(currentPitcher)} -> ${roleOf(candidate)}`;
+      const desc = describeSub("pitching", currentPitcher, candidate, note);
+      game.subs.push({
+        inning, half: isHomeSide ? "bottom" : "top", kind: "pitching",
+        team: isHomeSide ? "home" : "away",
+        outPlayer: currentPitcher, inPlayer: candidate, note, description: desc
+      });
+    }
+    return candidate;
   }
 
   let homeIdx = 0, awayIdx = 0;
+  let inning = 1;
   const maxInnings = 9;
-  for (let inning = 1; inning <= maxInnings || game.score.home === game.score.away; inning++) {
-    // Away bats top, Home bats bottom. Pitching changes are checked at the
-    // top of each half based on fatigue accrued so far.
+
+  // Register starters before the first pitch and mark their actual start.
+  registerAppearance(homePitcher, "home", 1, "bottom");
+  registerAppearance(awayPitcher, "away", 1, "top");
+
+  while (inning <= maxInnings || game.score.home === game.score.away) {
+    // Top: away bats, home pitches.
     homePitcher = maybeRelieve(homeTeam, homePitcher, inning, true);
     game.outs.away = 0; game.bases.away = [null, null, null];
     const topPlays = [];
-    let topRunsBefore = game.score.away;
+    const topRunsBefore = game.score.away;
     let topHits = 0;
+
     while (game.outs.away < 3 && awayLineup.length) {
+      // Late-game bullpen management can happen after a plate appearance,
+      // not just between innings, which is common when a reliever gets into
+      // trouble with the heart of the order.
+      if (game.outs.away > 0 && inning >= 7 && shouldReplace(homeTeam, homePitcher, inning, true)) {
+        homePitcher = maybeRelieve(homeTeam, homePitcher, inning, true, true);
+      }
+
+      registerAppearance(homePitcher, "home", inning, "top");
       const batter = awayLineup[awayIdx % awayLineup.length]; awayIdx++;
       const pitchSeq = [];
-      const res = simPlateAppearance(batter, homePitcher, (pi) => pitchSeq.push(pi));
+      const res = simPlateAppearance(batter, homePitcher, pi => pitchSeq.push(pi));
       bumpPitchCount(homePitcher, pitchSeq.length);
       const runs = applyPAResult(game, "away", batter, homePitcher, res.result, inning);
       if (["1B", "2B", "3B", "HR"].includes(res.result)) topHits++;
+
       if (recordLog) {
         topPlays.push(describePAResult(batter, res.result, runs, game.outs.away));
         game.pitchLog.push({
@@ -283,29 +414,44 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
           scoreAfter: { home: game.score.home, away: game.score.away }
         });
       }
+
+      // A fresh high-leverage arm can enter after a crooked inning or when
+      // the tying/go-ahead run appears, rather than waiting for three outs.
+      if (game.outs.away < 3 && inning >= 7 && shouldReplace(homeTeam, homePitcher, inning, true)) {
+        const before = homePitcher;
+        homePitcher = maybeRelieve(homeTeam, homePitcher, inning, true, true);
+        if (homePitcher === before) { /* stay with the current arm */ }
+      }
     }
     game.lob.away += game.bases.away.filter(Boolean).length;
     if (recordLog) game.log.push({
       inning, half: "top", plays: topPlays,
-      runsThisHalf: game.score.away - topRunsBefore,
-      hitsThisHalf: topHits,
+      runsThisHalf: game.score.away - topRunsBefore, hitsThisHalf: topHits,
       scoreAfter: { home: game.score.home, away: game.score.away }
     });
 
     if (inning >= maxInnings && game.score.home > game.score.away) break;
 
+    // Bottom: home bats, away pitches.
     awayPitcher = maybeRelieve(awayTeam, awayPitcher, inning, false);
     game.outs.home = 0; game.bases.home = [null, null, null];
     const bottomPlays = [];
-    let bottomRunsBefore = game.score.home;
+    const bottomRunsBefore = game.score.home;
     let bottomHits = 0;
+
     while (game.outs.home < 3 && homeLineup.length) {
+      if (game.outs.home > 0 && inning >= 7 && shouldReplace(awayTeam, awayPitcher, inning, false)) {
+        awayPitcher = maybeRelieve(awayTeam, awayPitcher, inning, false, true);
+      }
+
+      registerAppearance(awayPitcher, "away", inning, "bottom");
       const batter = homeLineup[homeIdx % homeLineup.length]; homeIdx++;
       const pitchSeq = [];
-      const res = simPlateAppearance(batter, awayPitcher, (pi) => pitchSeq.push(pi));
+      const res = simPlateAppearance(batter, awayPitcher, pi => pitchSeq.push(pi));
       bumpPitchCount(awayPitcher, pitchSeq.length);
       const runs = applyPAResult(game, "home", batter, awayPitcher, res.result, inning);
       if (["1B", "2B", "3B", "HR"].includes(res.result)) bottomHits++;
+
       if (recordLog) {
         bottomPlays.push(describePAResult(batter, res.result, runs, game.outs.home));
         game.pitchLog.push({
@@ -315,50 +461,153 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
           scoreAfter: { home: game.score.home, away: game.score.away }
         });
       }
-      // Walk-off: home team takes the lead in the bottom of the 9th (or later) - game ends immediately
+
       if (inning >= maxInnings && game.score.home > game.score.away) break;
+
+      if (game.outs.home < 3 && inning >= 7 && shouldReplace(awayTeam, awayPitcher, inning, false)) {
+        const before = awayPitcher;
+        awayPitcher = maybeRelieve(awayTeam, awayPitcher, inning, false, true);
+        if (awayPitcher === before) { /* stay with the current arm */ }
+      }
     }
+
     game.lob.home += game.bases.home.filter(Boolean).length;
     if (recordLog) game.log.push({
       inning, half: "bottom", plays: bottomPlays,
-      runsThisHalf: game.score.home - bottomRunsBefore,
-      hitsThisHalf: bottomHits,
+      runsThisHalf: game.score.home - bottomRunsBefore, hitsThisHalf: bottomHits,
       scoreAfter: { home: game.score.home, away: game.score.away }
     });
 
-    if (inning >= maxInnings + 15) break; // safety valve for extras
+    if (inning >= maxInnings + 15) break;
+    inning++;
   }
 
-  // Finalize pitcher outs. If we recorded a pitch-level log, credit outs
-  // based on who actually appeared for each side (splitting evenly across
-  // any mid-game relief); otherwise (fast-sim path) credit the full game
-  // to whichever starter got a line, matching prior simplified behavior.
-  if (recordLog && game.pitchLog.length) {
-    for (const side of ["away", "home"]) {
-      const half = side === "away" ? "top" : "bottom";
-      const ids = [...new Set(game.pitchLog.filter(x => x.half === half).map(x => x.pitcher.id))];
-      if (!ids.length) continue;
-      const share = Math.floor(27 / ids.length);
-      ids.forEach((id, i) => {
-        if (game.pitcherLines.has(id)) game.pitcherLines.get(id).outs = (i === ids.length - 1) ? (27 - share * (ids.length - 1)) : share;
-      });
-    }
-  } else {
-    if (game.pitcherLines.has(homeStartingPitcher.id)) game.pitcherLines.get(homeStartingPitcher.id).outs = 27;
-    if (game.pitcherLines.has(awayStartingPitcher.id)) game.pitcherLines.get(awayStartingPitcher.id).outs = 27;
-  }
-
-  const winner = game.score.home >= game.score.away ? homeTeam : awayTeam;
+  // Actual innings pitched are derived from actual outs recorded in
+  // applyPAResult. No artificial 27-out split is used.
+  const winner = game.score.home > game.score.away ? homeTeam : awayTeam;
   const loser = winner === homeTeam ? awayTeam : homeTeam;
+  finalizePitchingDecisions(game, winner, loser, homeTeam, awayTeam);
+
+  const winningPitcher = [...game.pitcherLines.values()].find(x => x.W)?.player || homeStartingPitcher;
+  const losingPitcher = [...game.pitcherLines.values()].find(x => x.L)?.player || awayStartingPitcher;
+
   return {
-    game, homeTeam, awayTeam, homeScore: game.score.home, awayScore: game.score.away, winner, loser,
-    winningPitcher: winner === homeTeam ? homeStartingPitcher : awayStartingPitcher,
-    losingPitcher: loser === homeTeam ? homeStartingPitcher : awayStartingPitcher,
+    game, homeTeam, awayTeam, homeScore: game.score.home, awayScore: game.score.away,
+    winner, loser, winningPitcher, losingPitcher,
     homeLineup: homeLineupInfo, awayLineup: awayLineupInfo,
     homeStartingPitcher, awayStartingPitcher
   };
 }
 
+// Finalize MLB-style pitching decisions from the pitchers who actually
+// appeared. The implementation follows the important official concepts:
+// a starter normally needs 5 IP for a win; the losing pitcher is charged
+// with the go-ahead run; a save belongs to the finishing reliever in a save
+// situation; a hold belongs to a reliever who leaves with the lead intact.
+function finalizePitchingDecisions(game, winner, loser, homeTeam, awayTeam) {
+  const sideForTeam = team => team === homeTeam ? "home" : "away";
+  const winnerSide = sideForTeam(winner);
+  const loserSide = sideForTeam(loser);
+  const ordered = [...game.pitcherLines.values()];
+  if (!ordered.length) return;
+
+  // Determine the winning pitcher. If the starter completed >=5 IP, he gets
+  // the win when his team never surrendered the final lead. Otherwise use
+  // the most effective reliever who was on the mound when the team took its
+  // final lead, with a conservative fallback to the last winning pitcher.
+  const winCandidates = ordered.filter(l => {
+    const u = game.pitcherUsage.get(l.player.id);
+    return u && u.team === winnerSide;
+  });
+  const finalLead = winner === homeTeam
+    ? game.score.home - game.score.away
+    : game.score.away - game.score.home;
+
+  // Use the game's actual starting pitcher references instead of relying on
+  // team objects that may not expose a starter field.
+  const winningStarter = winner === homeTeam ? [...ordered].find(l => l.player.id === [...game.pitcherUsage.values()].find(u => u.team === "home" && u.started)?.player.id) :
+    [...ordered].find(l => l.player.id === [...game.pitcherUsage.values()].find(u => u.team === "away" && u.started)?.player.id);
+  let winLine = null;
+
+  if (winningStarter && winningStarter.outs >= 15) winLine = winningStarter;
+  if (!winLine) {
+    const winnerAppearances = winCandidates.sort((a, b) => {
+      const au = game.pitcherUsage.get(a.player.id), bu = game.pitcherUsage.get(b.player.id);
+      const as = (a.SO * 2) + a.outs - a.ER * 2;
+      const bs = (b.SO * 2) + b.outs - b.ER * 2;
+      return bs - as;
+    });
+    winLine = winnerAppearances[0] || null;
+  }
+  if (winLine) winLine.W = 1;
+
+  // Find the pitcher responsible for the losing team's decisive deficit:
+  // walk through scoring states and keep the pitcher who was on the mound
+  // when the winning team first established the final winning margin.
+  const losingCandidates = ordered.filter(l => game.pitcherUsage.get(l.player.id)?.team === loserSide);
+  let lossLine = losingCandidates[losingCandidates.length - 1] || null;
+  let prevMargin = 0;
+  let finalGoAheadPitch = null;
+  for (const play of game.pitchLog) {
+    const margin = play.scoreAfter[winnerSide] - play.scoreAfter[loserSide];
+    if (margin > 0 && prevMargin <= 0) finalGoAheadPitch = play;
+    if (margin <= 0) finalGoAheadPitch = null;
+    prevMargin = margin;
+  }
+  if (finalGoAheadPitch) lossLine = game.pitcherLines.get(finalGoAheadPitch.pitcher.id) || lossLine;
+  if (lossLine) lossLine.L = 1;
+
+  // Save / hold logic is based on the finishing reliever and the score at
+  // his entry. A reliever cannot receive both a win and a save.
+  const finishers = [];
+  const finalHalf = winnerSide === "home" ? "bottom" : "top";
+  for (const line of ordered) {
+    const u = game.pitcherUsage.get(line.player.id);
+    if (!u || u.team !== winnerSide) continue;
+    const teamIsStarter = u.started;
+    const isReliever = !teamIsStarter;
+    if (!isReliever) continue;
+
+    const lastAppearancePitch = [...game.pitchLog].reverse().find(x => x.pitcher.id === line.player.id && x.half === finalHalf);
+    const finished = lastAppearancePitch && (
+      (winnerSide === "home" && lastAppearancePitch.outsAfter >= 3) ||
+      (winnerSide === "away" && lastAppearancePitch.outsAfter >= 3) ||
+      (lastAppearancePitch.inning >= 9 && game.score.home !== game.score.away && winnerSide === "home") ||
+      (lastAppearancePitch.inning >= 9 && game.score.home !== game.score.away && winnerSide === "away")
+    );
+    if (finished || !finishers.length) finishers.push(line);
+  }
+
+  // The last winning reliever to appear is the finishing pitcher.
+  const winningRelievers = ordered.filter(l => {
+    const u = game.pitcherUsage.get(l.player.id);
+    return u && u.team === winnerSide && !u.started;
+  }).sort((a, b) => (game.pitcherUsage.get(a.player.id).firstInning - game.pitcherUsage.get(b.player.id).firstInning));
+  const finisher = winningRelievers[winningRelievers.length - 1] || null;
+
+  if (finisher && !finisher.W && !finisher.L) {
+    const u = game.pitcherUsage.get(finisher.player.id);
+    const entryPitch = game.pitchLog.find(x => x.pitcher.id === finisher.player.id);
+    const entryInning = u ? u.firstInning : 99;
+    const entryDiff = u ? u.enteredScoreDiff : finalLead;
+    const saveEligible = finalLead > 0 && entryDiff > 0 && (
+      entryDiff <= 3 ||
+      entryInning >= 7 ||
+      finisher.outs >= 9
+    );
+    if (saveEligible) finisher.SV = 1;
+  }
+
+  // Holds: a non-finishing reliever who enters in a save situation and
+  // leaves with his team still ahead gets a hold, provided he did not get W/L.
+  for (const line of winningRelievers) {
+    if (line === finisher || line.W || line.L) continue;
+    const u = game.pitcherUsage.get(line.player.id);
+    if (!u) continue;
+    const entryDiff = u.enteredScoreDiff;
+    if (entryDiff > 0 && (entryDiff <= 3 || u.firstInning >= 7)) line.HLD = 1;
+  }
+}
 // Picks the standout performer of a completed game from both teams' box
 // score lines, batters and pitchers alike, using a simple weighted score
 // (hits/power/RBI/runs for hitters, outs recorded/strikeouts/runs allowed
@@ -421,8 +670,12 @@ function commitGameStats(result) {
     const p = line.player;
     const s = p.seasonStats.pitching;
     s.G++;
-    if (p === result.winningPitcher) s.W++;
-    if (p === result.losingPitcher) s.L++;
+    if (line.W) s.W += line.W;
+    if (line.L) s.L += line.L;
+    if (line.SV) s.SV += line.SV;
+    if (line.HLD) s.HLD = (s.HLD || 0) + line.HLD;
+    const usage = result.game.pitcherUsage && result.game.pitcherUsage.get(p.id);
+    if (usage && usage.started) s.GS = (s.GS || 0) + 1;
     s.IP += line.outs / 3;
     s.H += line.H; s.ER += line.ER; s.BB += line.BB; s.SO += line.SO;
     if (p.isUser) trackUserPlayingTime(p, true);

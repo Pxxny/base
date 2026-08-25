@@ -47,6 +47,9 @@ function createPlayer({ name, age, nationality, position, isUser = false, levelH
     fielding: blankFieldingAttrs(levelHint),
     pitching: isPitcher(pos) ? blankPitchingAttrs(levelHint) : blankPitchingAttrs(10),
     pitchTypes: isPitcher(pos) ? pickPitchRepertoire(pos) : [],
+    bullpenRole: isPitcher(pos)
+      ? (pos === "SP" ? "Starter" : pos === "CP" ? "Closer" : pick(["Middle Relief", "Setup"]))
+      : null,
     health: { status: "Healthy", injury: null, daysOut: 0 },
     contract: null,
     teamId: null,
@@ -75,7 +78,7 @@ function pickPitchRepertoire(pos) {
 function emptyCareerStats() {
   return {
     batting: { G: 0, PA: 0, AB: 0, H: 0, "1B": 0, "2B": 0, "3B": 0, HR: 0, RBI: 0, R: 0, BB: 0, SO: 0, SB: 0, CS: 0 },
-    pitching: { G: 0, GS: 0, IP: 0, W: 0, L: 0, SV: 0, H: 0, ER: 0, BB: 0, SO: 0 }
+    pitching: { G: 0, GS: 0, IP: 0, W: 0, L: 0, SV: 0, HLD: 0, H: 0, ER: 0, BB: 0, SO: 0 }
   };
 }
 function emptySeasonStats() { return emptyCareerStats(); }
