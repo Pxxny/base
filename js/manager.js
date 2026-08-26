@@ -180,6 +180,12 @@ function managerDailyUpdate(state){
   if(m.experienceDays % 138 === 0){
     m.experienceYears++;
     m.reputation=clamp(m.reputation+3,0,100);
+    // Assistant Coach -> Bench Coach happens automatically after roughly
+    // 1-2 seasons on staff (per the career path spec), not a manual click.
+    if(m.role==="Assistant Coach" && m.experienceYears>=rnd(1,2)){
+      m.role="Bench Coach";
+      addNews(state, `${stateManagerName()} is promoted to Bench Coach after ${m.experienceYears} season(s) on staff.`);
+    }
     if(m.role!=="Manager" && m.experienceYears>=2){
       addNews(state, `${state.player?.name || "The coach"} has earned enough coaching experience to interview for a manager job.`);
       if (Math.random() < 0.65) managerJobOffer(state);
@@ -223,8 +229,17 @@ function renderManagerView(){
 
   if(m.role!=="Manager"){
     const card=el("div",{class:"card"}); card.appendChild(el("h3",{},"Coaching Path"));
-    card.appendChild(el("p",{},`Keep working with the staff. After about 2 seasons of coaching experience and a good reputation, manager interviews can appear.`));
-    if(m.role === "Assistant Coach" && m.experienceYears >= 1) card.appendChild(el("button",{class:"btn secondary",onclick:()=>{m.role="Bench Coach";addNews(STATE,`${stateManagerName()} is promoted to Bench Coach after earning the staff's trust.`);renderAll();}},"Earn Promotion: Bench Coach"));
+    const path = ["Assistant Coach","Bench Coach","Manager"];
+    const stepRow = el("p",{class:"small-note"}, path.map((step,i)=>{
+      const active = step===m.role;
+      return (i>0?" → ":"") + (active?`【${step}】`:step);
+    }).join(""));
+    card.appendChild(stepRow);
+    if(m.role==="Assistant Coach"){
+      card.appendChild(el("p",{},`Keep coaching to build experience. Assistant Coaches are typically promoted to Bench Coach after 1-2 seasons on staff (${m.experienceYears} season(s) so far).`));
+    } else {
+      card.appendChild(el("p",{},`Keep building reputation as Bench Coach. After enough coaching experience, other teams may offer you a Manager job.`));
+    }
     if(m.jobOffer) card.appendChild(el("button",{class:"btn amber",onclick:()=>{m.role="Manager";m.teamId=m.jobOffer.teamId;m.jobOffer=null;STATE.teams[m.teamId].manager={name:stateManagerName(),role:"Manager",reputation:m.reputation};seedManagerLineup(STATE,STATE.teams[m.teamId]);addNews(STATE,`${stateManagerName()} is hired as manager of ${STATE.teams[m.teamId].name}.`);renderAll();}},`Accept ${m.jobOffer.teamName} Manager Job`));
     wrap.appendChild(card); return wrap;
   }

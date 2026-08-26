@@ -37,6 +37,22 @@ function rollPitch(pitcher) {
 // onPitch(pitchInfo) is an optional callback invoked for each simulated
 // pitch of the at-bat (for the pitch-by-pitch log), receiving the pitch
 // and running count.
+// Per-Game-Plan modifiers. "off" applies when the batting team is run by
+// that plan (their hitters press for that style of contact); "def"
+// applies when the pitching/fielding team is run by that plan (their
+// pitcher/defense suppresses accordingly). Each is a small nudge on top
+// of the normal skill-based probabilities, so a plan changes the shape
+// of the simulated game (more Ks and walks, more extra-base pop, fewer
+// free passes, etc) rather than just relabeling the same numbers.
+const GAME_PLAN_MODS = {
+  "Balanced":            { off: { k: 0,     bb: 0,     hit: 0,     hr: 0,     bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
+  "Aggressive":          { off: { k: 0.012, bb: -0.01, hit: 0.008, hr: 0.015, bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
+  "Small Ball":          { off: { k: -0.01, bb: 0.005, hit: 0.006, hr: -0.02, bip: 0.02 }, def: { k: 0,     bb: 0,     hit: 0    } },
+  "Power":               { off: { k: 0.018, bb: -0.005,hit: -0.004,hr: 0.035, bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
+  "Pitching & Defense":  { off: { k: 0,     bb: 0,     hit: 0,     hr: 0,     bip: 0    }, def: { k: 0.014, bb: -0.008,hit: -0.014} },
+  "Development":         { off: { k: 0.006, bb: 0.004, hit: -0.006,hr: -0.01, bip: 0    }, def: { k: -0.006,bb: 0.004, hit: 0.008} }
+};
+
 function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
   const bOv = isPitcher(batter.position) ? 40 : battingOverall(batter);
   const pOv = pitcher ? pitchingOverall(pitcher) : 50;
@@ -48,6 +64,24 @@ function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
   let kChance = clamp(0.22 - diff * 0.0016 - (b.plateDiscipline - 50) * 0.001, 0.05, 0.45);
   let bbChance = clamp(0.09 + diff * 0.0012 + (b.plateDiscipline - 50) * 0.0012, 0.02, 0.2);
   let hitChance = clamp(0.255 + diff * 0.0022 + (b.contact - 50) * 0.0012, 0.12, 0.42);
+
+  // Apply the batting team's and pitching team's Game Plans (if either
+  // side is run by a player-manager), so strategy actually reshapes the
+  // outcome distribution instead of only nudging a single clutch number.
+  const offMod = matchup && matchup.offStrategy && GAME_PLAN_MODS[matchup.offStrategy] ? GAME_PLAN_MODS[matchup.offStrategy].off : null;
+  const defMod = matchup && matchup.defStrategy && GAME_PLAN_MODS[matchup.defStrategy] ? GAME_PLAN_MODS[matchup.defStrategy].def : null;
+  let hrMod = 0, bipMod = 0;
+  if (offMod) {
+    kChance = clamp(kChance + offMod.k, 0.03, 0.55);
+    bbChance = clamp(bbChance + offMod.bb, 0.015, 0.24);
+    hitChance = clamp(hitChance + offMod.hit, 0.10, 0.45);
+    hrMod += offMod.hr; bipMod += offMod.bip;
+  }
+  if (defMod) {
+    kChance = clamp(kChance + defMod.k, 0.03, 0.55);
+    bbChance = clamp(bbChance + defMod.bb, 0.015, 0.24);
+    hitChance = clamp(hitChance + defMod.hit, 0.10, 0.45);
+  }
 
   // Simulate a plausible pitch count for this at-bat (cosmetic — the
   // eventual outcome is still governed by the probabilities above) so
@@ -68,9 +102,9 @@ function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
     // Determine hit type
     const powerFactor = (b.power - 50) / 100;
     const speedFactor = (b.speed - 50) / 100;
-    const hr = clamp(0.11 + powerFactor * 0.18, 0.02, 0.35);
-    const triple = clamp(0.02 + speedFactor * 0.03, 0.002, 0.06);
-    const double = clamp(0.19 + (b.gapPower - 50) * 0.002, 0.08, 0.32);
+    const hr = clamp(0.11 + powerFactor * 0.18 + hrMod, 0.01, 0.4);
+    const triple = clamp(0.02 + speedFactor * 0.03 + bipMod * 0.3, 0.002, 0.08);
+    const double = clamp(0.19 + (b.gapPower - 50) * 0.002 - hrMod * 0.4, 0.06, 0.32);
     const hr2 = Math.random();
     if (hr2 < hr) return { result: "HR" };
     if (hr2 < hr + triple) return { result: "3B" };
@@ -288,12 +322,19 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     const manager = (typeof STATE !== "undefined" && STATE?.manager?.active && STATE.manager.role === "Manager") ? STATE.manager : null;
     const battingTeam = pitchingTeam === homeTeam ? awayTeam : homeTeam;
     let strategyClutch = 0;
-    if (manager && manager.teamId === battingTeam.id) {
-      strategyClutch = ({"Aggressive":1.0,"Small Ball":0.8,"Power":1.2,"Pitching & Defense":0.3,"Development":-0.2,"Balanced":0.5}[manager.strategy] || 0);
+    let offStrategy = null, defStrategy = null;
+    if (manager) {
+      if (manager.teamId === battingTeam.id) {
+        offStrategy = manager.strategy;
+        strategyClutch = ({"Aggressive":1.0,"Small Ball":0.8,"Power":1.2,"Pitching & Defense":0.3,"Development":-0.2,"Balanced":0.5}[manager.strategy] || 0);
+      }
+      if (manager.teamId === pitchingTeam.id) {
+        defStrategy = manager.strategy;
+      }
     }
     const pitcherEffect = rivalry.pitcherEffects?.[pitchingTeam === homeTeam ? (homePitcher?.id) : (awayPitcher?.id)] || 0;
     if (!opts.rivalry && !manager) return null;
-    return { ...rivalry, batterId: batter.id, clutch: (rivalry.clutch || 0) + pitcherEffect + strategyClutch };
+    return { ...rivalry, batterId: batter.id, clutch: (rivalry.clutch || 0) + pitcherEffect + strategyClutch, offStrategy, defStrategy };
   };
   const pitchCounts = new Map();
   const bumpPitchCount = (p, n) => pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);
