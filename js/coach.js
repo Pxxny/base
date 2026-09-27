@@ -14,6 +14,13 @@
 // js/leagues.js (rnd/pick/clamp).
 
 const COACH_PERSONALITIES = {
+  "Player Manager": {
+    desc: "Runs the team directly, balancing winning, player development, and situational decisions.",
+    score(p, ctx) {
+      return battingOverall(p) * 1.15 + recentForm(p) * 0.8 + clamp((27 - p.age) * 1.1, -6, 10)
+        + (p.isUser ? (ctx.userFormBonus || 0) * 0.8 : 0);
+    }
+  },
   "Win Now": {
     desc: "Plays the best roster on paper, every day. Stars sit rarely.",
     score(p, ctx) { return battingOverall(p) * 1.4 + (p.isUser ? ctx.userFormBonus * 0.3 : 0); }
@@ -106,7 +113,7 @@ function buildLineup(team) {
   if (managerChoice) return managerChoice;
   const coach = getTeamCoach(team);
   const personality = COACH_PERSONALITIES[coach.personality];
-  const healthy = (team.roster || []).filter(p => !isPitcher(p.position) && p.health.status === "Healthy");
+  const healthy = (team.roster || []).filter(p => !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy");
   const pool = healthy.length >= 9 ? healthy : (team.roster || []).filter(p => !isPitcher(p.position));
   const ctx = {};
   const scored = pool.map(p => ({
@@ -170,7 +177,7 @@ const REST_DAYS_MIN = 4; // must have started at least this many days ago
 function pickStartingPitcher(team) {
   const coach = getTeamCoach(team);
   const today = (typeof STATE !== "undefined" && STATE) ? STATE.day : null;
-  const allSps = (team.roster || []).filter(p => p.position === "SP" && p.health.status === "Healthy");
+  const allSps = (team.roster || []).filter(p => p.position === "SP" && (p.health?.status || "Healthy") === "Healthy");
   const daysSinceStart = (p) => (today == null || typeof p.lastStartDay !== "number") ? Infinity : today - p.lastStartDay;
   let sps = allSps.filter(p => daysSinceStart(p) >= REST_DAYS_MIN);
   // Nobody's rested (short staff, or every arm just pitched) - fall back to
@@ -224,7 +231,7 @@ function pickStartingPitcher(team) {
 // Bullpen arms available for in-game relief substitutions, best-first.
 function bullpenOptions(team, excludeId) {
   return (team.roster || [])
-    .filter(p => isPitcher(p.position) && p.position !== "SP" && p.health.status === "Healthy" && p.id !== excludeId)
+    .filter(p => isPitcher(p.position) && p.position !== "SP" && (p.health?.status || "Healthy") === "Healthy" && p.id !== excludeId)
     .sort((a, b) => pitchingOverall(b) - pitchingOverall(a));
 }
 
@@ -232,7 +239,7 @@ function bullpenOptions(team, excludeId) {
 function benchOptions(team, currentOrder) {
   const startingIds = new Set(currentOrder.map(o => o.player.id));
   return (team.roster || [])
-    .filter(p => !isPitcher(p.position) && p.health.status === "Healthy" && !startingIds.has(p.id))
+    .filter(p => !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy" && !startingIds.has(p.id))
     .sort((a, b) => battingOverall(b) - battingOverall(a));
 }
 

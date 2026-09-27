@@ -23,53 +23,93 @@ const PITCH_TYPE_VELO_BASE = {
 // Picks a pitch type from the pitcher's repertoire and a velocity reading
 // for it, scaled by the pitcher's actual velocity attribute so a flame-
 // thrower's fastball reads faster than a finesse guy's.
-function rollPitch(pitcher) {
-  const repertoire = (pitcher && pitcher.pitchTypes && pitcher.pitchTypes.length) ? pitcher.pitchTypes : ["Fastball"];
-  const type = pick(repertoire);
-  const base = PITCH_TYPE_VELO_BASE[type] || 88;
-  const veloAttr = pitcher && pitcher.pitching ? pitcher.pitching.velocity : 50;
-  const veloAdj = (veloAttr - 50) * 0.12; // attribute 20-100 -> roughly -3.6 to +6 mph
-  const mph = Math.round(clamp(base + veloAdj + rnd(-2, 2), 62, 104));
-  return { type, mph };
+function pitchProfile(type) {
+  const profiles = {
+    "Fastball":       { velo: 1.00, control: 0.03, movement: 0.00, whiff: 0.02, contact: 0.01, ground: 0.00 },
+    "2-Seam Fastball":{ velo: 0.98, control: 0.02, movement: 0.08, whiff: 0.01, contact: 0.00, ground: 0.05 },
+    "Cutter":         { velo: 0.97, control: 0.01, movement: 0.07, whiff: 0.04, contact: -0.01, ground: 0.03 },
+    "Slider":         { velo: 0.92, control: -0.01,movement: 0.14, whiff: 0.09, contact: -0.02, ground: 0.02 },
+    "Curveball":      { velo: 0.86, control: -0.02,movement: 0.17, whiff: 0.08, contact: -0.01, ground: 0.04 },
+    "Changeup":       { velo: 0.89, control: 0.02, movement: 0.12, whiff: 0.07, contact: -0.03, ground: 0.07 },
+    "Splitter":       { velo: 0.91, control: -0.01,movement: 0.16, whiff: 0.10, contact: -0.03, ground: 0.08 },
+    "Knuckleball":    { velo: 0.74, control: -0.06,movement: 0.22, whiff: 0.06, contact: -0.01, ground: 0.05 }
+  };
+  return profiles[type] || profiles["Fastball"];
 }
 
-// Simulates one plate appearance outcome given batter vs pitcher attributes.
-// onPitch(pitchInfo) is an optional callback invoked for each simulated
-// pitch of the at-bat (for the pitch-by-pitch log), receiving the pitch
-// and running count.
-// Per-Game-Plan modifiers. "off" applies when the batting team is run by
-// that plan (their hitters press for that style of contact); "def"
-// applies when the pitching/fielding team is run by that plan (their
-// pitcher/defense suppresses accordingly). Each is a small nudge on top
-// of the normal skill-based probabilities, so a plan changes the shape
-// of the simulated game (more Ks and walks, more extra-base pop, fewer
-// free passes, etc) rather than just relabeling the same numbers.
-const GAME_PLAN_MODS = {
-  "Balanced":            { off: { k: 0,     bb: 0,     hit: 0,     hr: 0,     bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
-  "Aggressive":          { off: { k: 0.012, bb: -0.01, hit: 0.008, hr: 0.015, bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
-  "Small Ball":          { off: { k: -0.01, bb: 0.005, hit: 0.006, hr: -0.02, bip: 0.02 }, def: { k: 0,     bb: 0,     hit: 0    } },
-  "Power":               { off: { k: 0.018, bb: -0.005,hit: -0.004,hr: 0.035, bip: 0    }, def: { k: 0,     bb: 0,     hit: 0    } },
-  "Pitching & Defense":  { off: { k: 0,     bb: 0,     hit: 0,     hr: 0,     bip: 0    }, def: { k: 0.014, bb: -0.008,hit: -0.014} },
-  "Development":         { off: { k: 0.006, bb: 0.004, hit: -0.006,hr: -0.01, bip: 0    }, def: { k: -0.006,bb: 0.004, hit: 0.008} }
-};
+// The pitcher no longer throws a random, fixed repertoire sequence.
+// Pitch choice responds to the count, batter tendencies, pitcher strengths,
+// and game situation. This makes the same pitcher behave differently in 0-0,
+// 3-2, and two-strike counts.
+function choosePitch(pitcher, batter, balls, strikes) {
+  const repertoire = (pitcher?.pitchTypes?.length ? pitcher.pitchTypes : ["Fastball"]);
+  const p = pitcher?.pitching || {};
+  const b = batter?.batting || {};
+  const scored = repertoire.map(type => {
+    const prof = pitchProfile(type);
+    let score = 1;
+    if (type === "Fastball" || type === "2-Seam Fastball" || type === "Cutter") score += balls >= 2 ? 0.55 : 0.25;
+    if (strikes >= 2) score += prof.whiff * 3.0;
+    if (balls >= 3) score += (prof.control + 0.04) * 5.0;
+    if (b.plateDiscipline < 45) score += prof.movement * 1.2;
+    if (b.power > 70 && type === "Changeup") score += 0.55;
+    if (b.contact > 70 && prof.movement > 0.1) score += 0.35;
+    score += (p.movement - 50) / 120 * prof.movement;
+    score += (p.control - 50) / 160 * (prof.control + 0.08);
+    score += rnd(-0.18, 0.18);
+    return { type, score: Math.max(0.05, score) };
+  });
+  const total = scored.reduce((n, x) => n + x.score, 0);
+  let r = Math.random() * total;
+  for (const x of scored) {
+    r -= x.score;
+    if (r <= 0) return x.type;
+  }
+  return repertoire[0];
+}
 
-function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
+function rollPitch(pitcher, batter, balls = 0, strikes = 0, forcedType = null) {
+  const repertoire = (pitcher?.pitchTypes?.length ? pitcher.pitchTypes : ["Fastball"]);
+  const type = forcedType && repertoire.includes(forcedType)
+    ? forcedType
+    : choosePitch(pitcher, batter, balls, strikes);
+  const base = PITCH_TYPE_VELO_BASE[type] || 88;
+  const veloAttr = pitcher?.pitching?.velocity ?? 50;
+  const control = pitcher?.pitching?.control ?? 50;
+  const prof = pitchProfile(type);
+  const mph = Math.round(clamp(
+    base * prof.velo + (veloAttr - 50) * 0.12 + rnd(-1.5, 1.5),
+    62, 104
+  ));
+  const locationQuality = clamp(
+    0.62 + (control - 50) * 0.006 + prof.control + rnd(-0.10, 0.10),
+    0.25, 0.98
+  );
+  return { type, mph, locationQuality: Number(locationQuality.toFixed(2)), movement: prof.movement };
+}
+
+// Plate appearances are now built from the actual pitches thrown.
+// Count, pitch type, velocity, movement and location quality all feed the
+// final result instead of pitch data being cosmetic.
+function simPlateAppearance(batter, pitcher, onPitch, matchup = null, forcedPitches = []) {
   const bOv = isPitcher(batter.position) ? 40 : battingOverall(batter);
   const pOv = pitcher ? pitchingOverall(pitcher) : 50;
-  const b = batter.batting;
+  const b = batter.batting || {};
   const rivalryClutch = matchup && matchup.batterId === batter.id ? (matchup.clutch || 0) : 0;
-  const diff = bOv - pOv + rivalryClutch * 0.35; // positive favors batter
+  let diff = bOv - pOv + rivalryClutch * 0.35;
+  if (typeof STATE !== "undefined" && STATE?.player?.id === batter?.id) {
+    diff += ((Number(STATE.player.morale ?? 60) - 50) * 0.08);
+  }
+  if (typeof STATE !== "undefined" && STATE?.player?.id === pitcher?.id) {
+    diff -= ((Number(STATE.player.morale ?? 60) - 50) * 0.05);
+  }
 
-  // Base probabilities (league-average-ish), shifted by skill diff
-  let kChance = clamp(0.22 - diff * 0.0016 - (b.plateDiscipline - 50) * 0.001, 0.05, 0.45);
-  let bbChance = clamp(0.09 + diff * 0.0012 + (b.plateDiscipline - 50) * 0.0012, 0.02, 0.2);
-  let hitChance = clamp(0.255 + diff * 0.0022 + (b.contact - 50) * 0.0012, 0.12, 0.42);
+  let kChance = clamp(0.21 - diff * 0.00155 - (b.plateDiscipline - 50) * 0.001, 0.05, 0.44);
+  let bbChance = clamp(0.085 + diff * 0.0011 + (b.plateDiscipline - 50) * 0.0011, 0.02, 0.19);
+  let hitChance = clamp(0.245 + diff * 0.0020 + (b.contact - 50) * 0.0011, 0.11, 0.40);
 
-  // Apply the batting team's and pitching team's Game Plans (if either
-  // side is run by a player-manager), so strategy actually reshapes the
-  // outcome distribution instead of only nudging a single clutch number.
-  const offMod = matchup && matchup.offStrategy && GAME_PLAN_MODS[matchup.offStrategy] ? GAME_PLAN_MODS[matchup.offStrategy].off : null;
-  const defMod = matchup && matchup.defStrategy && GAME_PLAN_MODS[matchup.defStrategy] ? GAME_PLAN_MODS[matchup.defStrategy].def : null;
+  const offMod = matchup?.offStrategy && GAME_PLAN_MODS[matchup.offStrategy] ? GAME_PLAN_MODS[matchup.offStrategy].off : null;
+  const defMod = matchup?.defStrategy && GAME_PLAN_MODS[matchup.defStrategy] ? GAME_PLAN_MODS[matchup.defStrategy].def : null;
   let hrMod = 0, bipMod = 0;
   if (offMod) {
     kChance = clamp(kChance + offMod.k, 0.03, 0.55);
@@ -83,36 +123,87 @@ function simPlateAppearance(batter, pitcher, onPitch, matchup = null) {
     hitChance = clamp(hitChance + defMod.hit, 0.10, 0.45);
   }
 
-  // Simulate a plausible pitch count for this at-bat (cosmetic — the
-  // eventual outcome is still governed by the probabilities above) so
-  // the live view has a believable ball-strike sequence to show.
-  let balls = 0, strikes = 0;
-  const pitchCount = rnd(1, 6);
-  for (let i = 0; i < pitchCount; i++) {
-    const pitch = rollPitch(pitcher);
-    if (Math.random() < 0.42) balls = Math.min(3, balls + 1);
-    else strikes = Math.min(2, strikes + 1);
-    if (onPitch) onPitch({ ...pitch, balls, strikes });
+  let balls = 0, strikes = 0, swingPitches = 0, qualitySum = 0, whiffPressure = 0, groundPressure = 0;
+  const maxPitches = rnd(3, 8);
+  const pitches = [];
+  for (let i = 0; i < maxPitches; i++) {
+    const forced = forcedPitches[i] || null;
+    const pitch = rollPitch(pitcher, batter, balls, strikes, forced);
+    const prof = pitchProfile(pitch.type);
+    const fatigue = pitcher?.fatigue ? clamp(pitcher.fatigue / 100, 0, 0.45) : 0;
+    const command = clamp(pitch.locationQuality - fatigue * 0.35, 0.12, 0.98);
+    const zone = Math.random() < clamp(0.55 + command * 0.22, 0.42, 0.82);
+    const swingRate = clamp(
+      0.48 + (b.contact - 50) * 0.002 + (strikes * 0.12) - (balls * 0.08) +
+      (b.plateDiscipline - 50) * -0.0015,
+      0.28, 0.92
+    );
+    const swing = Math.random() < swingRate;
+    if (swing) swingPitches++;
+
+    if (swing) {
+      const contactQuality = clamp(
+        0.60 + (b.contact - 50) * 0.006 - (pitcher?.pitching?.pitchQuality - 50) * 0.003 -
+        prof.whiff * 0.65 - prof.movement * 0.35 + command * 0.20 + rnd(-0.18, 0.18),
+        0.05, 0.98
+      );
+      qualitySum += contactQuality;
+      whiffPressure += (1 - contactQuality) * (0.45 + prof.whiff);
+      groundPressure += prof.ground * contactQuality;
+      if (contactQuality < 0.25) strikes++;
+      else if (contactQuality < 0.43) strikes++;
+      else {
+        // Strong contact ends the PA in play; the quality later determines
+        // whether it becomes a hit and how much extra-base power is present.
+        pitches.push({ ...pitch, balls, strikes, zone, swing, contactQuality: Number(contactQuality.toFixed(2)) });
+        if (onPitch) onPitch(pitches[pitches.length - 1]);
+        break;
+      }
+    } else {
+      if (zone) strikes++; else balls++;
+    }
+    if (balls >= 4 || strikes >= 3) {
+      pitches.push({ ...pitch, balls: Math.min(3, balls), strikes: Math.min(2, strikes), zone, swing });
+      if (onPitch) onPitch(pitches[pitches.length - 1]);
+      break;
+    }
+    pitches.push({ ...pitch, balls, strikes, zone, swing });
+    if (onPitch) onPitch(pitches[pitches.length - 1]);
   }
 
+  // Count outcomes have priority. Otherwise use the accumulated contact
+  // quality to resolve the batted-ball result.
+  const last = pitches[pitches.length - 1];
+  const kBonus = whiffPressure * 0.035 + Math.max(0, (last?.strikes || 0) - 1) * 0.018;
+  const bbBonus = (last?.balls || 0) >= 3 ? 0.025 : 0;
+  kChance = clamp(kChance + kBonus, 0.04, 0.52);
+  bbChance = clamp(bbChance + bbBonus, 0.015, 0.23);
+
+  if (balls >= 4) return { result: "BB", pitches };
+  if (strikes >= 3) return { result: "SO", pitches };
+
+  const contactQuality = qualitySum / Math.max(1, swingPitches);
   const r = Math.random();
-  if (r < kChance) return { result: "SO" };
-  if (r < kChance + bbChance) return { result: "BB" };
-  if (r < kChance + bbChance + hitChance) {
-    // Determine hit type
-    const powerFactor = (b.power - 50) / 100;
-    const speedFactor = (b.speed - 50) / 100;
-    const hr = clamp(0.11 + powerFactor * 0.18 + hrMod, 0.01, 0.4);
-    const triple = clamp(0.02 + speedFactor * 0.03 + bipMod * 0.3, 0.002, 0.08);
-    const double = clamp(0.19 + (b.gapPower - 50) * 0.002 - hrMod * 0.4, 0.06, 0.32);
-    const hr2 = Math.random();
-    if (hr2 < hr) return { result: "HR" };
-    if (hr2 < hr + triple) return { result: "3B" };
-    if (hr2 < hr + triple + double) return { result: "2B" };
-    return { result: "1B" };
+  const effectiveHit = clamp(hitChance + (contactQuality - 0.5) * 0.20 - whiffPressure * 0.025, 0.08, 0.46);
+  if (r < kChance * 0.55) return { result: "SO", pitches };
+
+  if (r < kChance * 0.55 + bbChance * 0.65) return { result: "BB", pitches };
+
+  if (r < kChance * 0.55 + bbChance * 0.65 + effectiveHit) {
+    const powerFactor = ((b.power || 50) - 50) / 100;
+    const speedFactor = ((b.speed || 50) - 50) / 100;
+    const qualityBoost = (contactQuality - 0.5) * 0.30;
+    const hr = clamp(0.08 + powerFactor * 0.17 + qualityBoost + hrMod, 0.01, 0.38);
+    const triple = clamp(0.018 + speedFactor * 0.03 + bipMod * 0.3, 0.002, 0.08);
+    const double = clamp(0.18 + ((b.gapPower || 50) - 50) * 0.002 - hrMod * 0.35 + qualityBoost * 0.25, 0.05, 0.31);
+    const hitRoll = Math.random();
+    if (hitRoll < hr) return { result: "HR", pitches };
+    if (hitRoll < hr + triple) return { result: "3B", pitches };
+    if (hitRoll < hr + triple + double) return { result: "2B", pitches };
+    return { result: "1B", pitches };
   }
-  // Ball in play out - could be sac fly / ground out etc, simplified to OUT
-  return { result: "OUT" };
+
+  return { result: "OUT", pitches };
 }
 
 // Human-readable description of a plate appearance result, for the
@@ -337,7 +428,16 @@ function simulateGame(homeTeam, awayTeam, opts = {}) {
     return { ...rivalry, batterId: batter.id, clutch: (rivalry.clutch || 0) + pitcherEffect + strategyClutch, offStrategy, defStrategy };
   };
   const pitchCounts = new Map();
-  const bumpPitchCount = (p, n) => pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);
+  const bumpPitchCount = (p, n) => {
+    pitchCounts.set(p.id, (pitchCounts.get(p.id) || 0) + n);
+    // Fatigue accumulates during an appearance. Stamina controls how quickly
+    // it matters, so a high-stamina starter can attack late innings without
+    // becoming unrealistically dominant.
+    if (p && p.pitching) {
+      const stamina = p.pitching.stamina || 50;
+      p.fatigue = clamp((p.fatigue || 0) + n * (0.018 + (100 - stamina) * 0.00035), 0, 100);
+    }
+  };
 
   function registerAppearance(p, teamKey, inning, half) {
     if (!game.pitcherUsage.has(p.id)) {

@@ -99,6 +99,7 @@ function restoreLoadedState(parsed) {
   parsed.waiverClaims ||= [];
   parsed.freeAgentPool ||= [];
   parsed.h2h ||= {};
+  if (typeof ensureCoreSystems === "function") ensureCoreSystems(parsed);
   return parsed;
 }
 
@@ -108,7 +109,9 @@ async function doSave() {
     const compressed = await gzipString(json);
     const payload = compressed ? "GZ1:" + compressed : "JS1:" + json;
     try {
-      localStorage.setItem(SAVE_KEY, payload);
+      const previous = localStorage.getItem(SAVE_KEY);
+    if (previous) localStorage.setItem(SAVE_KEY + "-backup", previous);
+    localStorage.setItem(SAVE_KEY, payload);
     } catch (e) {
       // Last-resort recovery: remove only our own older save, then retry once.
       if (e && (e.name === "QuotaExceededError" || /quota/i.test(e.message || ""))) {
@@ -126,7 +129,8 @@ async function doSave() {
 
 async function doLoad() {
   try {
-    const payload = localStorage.getItem(SAVE_KEY);
+    let payload = localStorage.getItem(SAVE_KEY);
+    if (!payload) payload = localStorage.getItem(SAVE_KEY + "-backup");
     if (!payload) {
       toast("No saved career found.");
       return;

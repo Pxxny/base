@@ -82,7 +82,7 @@ function buildSeasonSchedule(state, leagueKey) {
 // Dominican Rookie League team.
 function todaysMatchupGroups(state) {
   const groups = [];
-  for (const leagueKey of ["MLB", "NPB", "KBO"]) {
+  for (const leagueKey of PRO_LEAGUE_CODES) {
     groups.push(state.allTeams.filter(t => t.league === leagueKey));
   }
   const minorGroups = {};

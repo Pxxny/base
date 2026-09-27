@@ -111,7 +111,8 @@ function newGameState() {
     transactionLog: [],
     transactionState: { lastTradeDay: 0, lastWaiverDay: 0, lastFAActionDay: 0 },
     h2h: {},
-    manager: { active: false, role: null, teamId: null, experienceYears: 0, experienceDays: 0, reputation: 35, strategy: "Balanced", lineupIds: [], lineupPositions: {}, draftBoard: [], prospectPool: [], transactions: [], awards: [], fired: false, jobHistory: [] }
+    manager: { active: false, role: null, teamId: null, experienceYears: 0, experienceDays: 0, reputation: 35, strategy: "Balanced", lineupIds: [], lineupPositions: {}, draftBoard: [], prospectPool: [], transactions: [], awards: [], fired: false, jobHistory: [] },
+    coreSystems: { version: 1, autosave: { enabled: true, intervalSec: 30, lastSavedAt: null, saveCount: 0, lastError: null }, morale: {}, teamChemistry: {}, scouting: { reports: {}, lastReportDay: 0 }, weather: {}, milestones: { unlocked: [], recent: [] }, notifications: [], gameHistory: [], settings: { difficulty: "Normal", autoAdvance: false, confirmImportantActions: true } }
   };
 }
 
@@ -484,7 +485,7 @@ function acceptContractOffer(state, offer) {
 
 function levelHasLowerOption(p) {
   if (MINOR_LEVELS.includes(p.level)) return MINOR_LEVELS.indexOf(p.level) > 0;
-  return true; // MLB/NPB/KBO players can always drop into a minor-league deal
+  return true; // Pro-league players can always drop into a minor-league deal
 }
 function levelHasHigherOption(p) {
   return MINOR_LEVELS.includes(p.level); // top pro levels have nowhere higher to go
@@ -874,7 +875,7 @@ function screenTeamSelect() {
   const wrap = el("div", { class: "card" });
   wrap.appendChild(el("h2", {}, "Choose Your League"));
   const grid = el("div", { class: "option-grid" });
-  for (const lg of ["MLB", "NPB", "KBO"]) {
+  for (const lg of PRO_LEAGUE_CODES) {
     grid.appendChild(el("div", {
       class: "option-card",
       onclick: () => {
@@ -1179,7 +1180,7 @@ function standingsTable(teams) {
 
 function renderStandingsView() {
   const wrap = el("div");
-  for (const lg of ["MLB", "NPB", "KBO"]) {
+  for (const lg of PRO_LEAGUE_CODES) {
     const card = el("div", { class: "card" });
     card.appendChild(el("h2", {}, lg + " Standings"));
     card.appendChild(standingsTable(STATE.allTeams.filter(t => t.league === lg)));
@@ -1230,6 +1231,7 @@ function screenTab(tab) {
   else if (tab === "awards") wrap.appendChild(renderAwardsView());
   else if (tab === "news") wrap.appendChild(renderNewsView());
   else if (tab === "save") wrap.appendChild(renderSaveView());
+  else if (tab === "systems") wrap.appendChild(renderCoreSystemsView());
   return wrap;
 }
 
@@ -1498,6 +1500,7 @@ function startGameDay() {
   // "live" pitch-by-pitch view on the Game Day tab is about to walk through
   // it, and this log renders on the Career tab, so revealing the final score
   // there would spoil a game the player hasn't actually watched play out yet.
+  if (userGameResult && typeof coreRecordGame === "function") coreRecordGame(userGameResult);
   const resultsForLog = userGameResult ? results.filter(r => r !== userGameResult) : results;
   LAST_GAME_LOGS = summarizeResults(resultsForLog);
   checkPromotion();
@@ -1738,7 +1741,8 @@ function renderStartingLineupsCard(gv) {
 function lineupColumn(team, lineupInfo, startingPitcher, userPlayer) {
   const box = el("div");
   box.appendChild(el("h3", {}, team.name));
-  box.appendChild(el("p", { class: "small-note" }, `Manager: ${lineupInfo.coach.name} — ${lineupInfo.coach.personality} (${COACH_PERSONALITIES[lineupInfo.coach.personality].desc})`));
+  const coachProfile = COACH_PERSONALITIES[lineupInfo.coach.personality] || COACH_PERSONALITIES["Balanced"];
+  box.appendChild(el("p", { class: "small-note" }, `Manager: ${lineupInfo.coach.name} — ${lineupInfo.coach.personality} (${coachProfile.desc})`));
   const table = el("table", { class: "stat-table" });
   table.appendChild(el("tr", {}, ["#", "Pos", "Player", "OVR"].map(h => el("th", {}, h))));
   for (const slot of lineupInfo.order) {
@@ -1841,7 +1845,7 @@ function renderLiveGameCard(gv) {
   // Live field snapshot: the plate appearance currently being played out.
   if (!gv.finished && currentPA) {
     const currentHalf = log[revealedHalfInnings] || log[log.length - 1];
-    card.appendChild(renderFieldDiagram(currentHalf, currentPA, result, gv));
+    card.appendChild(renderEnhancedFieldDiagram(currentHalf, currentPA, result, gv));
   }
 
   const boardWrap = el("div", { style: "margin-top:14px;" });
@@ -1902,6 +1906,26 @@ function renderLiveGameCard(gv) {
 // of the current at-bat (with a throw/swing animation), or - once every
 // pitch of the at-bat has been shown - resolves the at-bat's outcome and
 // moves on to the next plate appearance.
+
+function setLivePitchCall(type) {
+  const gv = GAME_VIEW;
+  if (!gv || gv.stage !== "live") return;
+  const pa = gv.result.game.pitchLog?.[gv.paIndex];
+  const user = STATE.player;
+  if (!pa || !user || pa.pitcher?.id !== user.id) return;
+  const allowed = pa.pitcher.pitchTypes?.length ? pa.pitcher.pitchTypes : ["Fastball"];
+  if (!allowed.includes(type) || gv.pitchIndex >= pa.pitches.length) return;
+  gv.selectedPitchType = type;
+  const pitch = pa.pitches[gv.pitchIndex];
+  const base = PITCH_TYPE_VELO_BASE[type] || 88;
+  const v = pitch.pitcher?.pitching?.velocity ?? pa.pitcher.pitching?.velocity ?? 50;
+  const profile = typeof pitchProfile === "function" ? pitchProfile(type) : { velo: 1 };
+  pitch.type = type;
+  pitch.mph = Math.round(clamp(base * (profile.velo || 1) + (v - 50) * 0.12 + rnd(-1.5, 1.5), 62, 104));
+  pitch.calledByUser = true;
+  renderAll();
+}
+
 function advanceGamePitch() {
   const gv = GAME_VIEW;
   if (!gv) return;
@@ -2065,6 +2089,27 @@ function renderFieldDiagram(currentHalf, currentPA, result, gv) {
     el("span", {}, String(displayOuts))
   ]));
   infoWrap.appendChild(info);
+
+  // User-controlled pitch calling. AI pitchers already choose adaptively in
+  // simulation.js; when the user's pitcher is on the mound, the live game
+  // exposes the actual repertoire instead of forcing one pitch type.
+  if (isPitcherUser && currentPA.pitcher.pitchTypes?.length && !gv.finished && gv.pitchIndex < currentPA.pitches.length) {
+    const pitchCard = el("div", { style: "margin-top:12px;" });
+    pitchCard.appendChild(el("div", { class: "field-info-lbl", style: "margin-bottom:6px;" }, "CALL NEXT PITCH"));
+    const pitchButtons = el("div", { class: "pitch-choice-row" });
+    const selected = gv.selectedPitchType || currentPA.pitches[gv.pitchIndex]?.type;
+    for (const type of currentPA.pitcher.pitchTypes) {
+      pitchButtons.appendChild(el("button", {
+        class: `btn secondary pitch-choice ${selected === type ? "selected" : ""}`,
+        onclick: () => setLivePitchCall(type)
+      }, type));
+    }
+    pitchCard.appendChild(pitchButtons);
+    pitchCard.appendChild(el("div", { class: "small-note", style: "margin-top:6px;" },
+      "Choose from this pitcher's repertoire. Pitch behavior is driven by velocity, movement, control and the count."));
+    infoWrap.appendChild(pitchCard);
+  }
+
   box.appendChild(infoWrap);
   return box;
 }

@@ -9,13 +9,30 @@ const LEAGUES = {
   MLB: { name: "Major League Baseball", teams: 30, regularSeasonGames: 162, level: 5, country: "USA" },
   NPB: { name: "Nippon Professional Baseball", teams: 12, regularSeasonGames: 143, level: 5, country: "Japan" },
   KBO: { name: "Korea Baseball Organization", teams: 10, regularSeasonGames: 144, level: 5, country: "South Korea" },
+  LMB: { name: "Liga Mexicana de Béisbol", teams: 20, regularSeasonGames: 93, level: 5, country: "Mexico" },
+  LPB: { name: "Liga Profesional de Béisbol Colombiano", teams: 4, regularSeasonGames: 28, level: 5, country: "Colombia" },
+  CPBL: { name: "Chinese Professional Baseball League", teams: 6, regularSeasonGames: 120, level: 5, country: "Taiwan" },
+  LBPRC: { name: "Liga de Béisbol Profesional Roberto Clemente", teams: 6, regularSeasonGames: 40, level: 5, country: "Puerto Rico" },
+  CPB: { name: "China Baseball City League", teams: 6, regularSeasonGames: 20, level: 5, country: "China" },
+  DBL: { name: "Deutsche Baseball Liga", teams: 12, regularSeasonGames: 30, level: 5, country: "Germany" },
+  NBL: { name: "National Baseball League", teams: 9, regularSeasonGames: 18, level: 5, country: "United Kingdom" },
+  ABL: { name: "Australian Baseball League", teams: 6, regularSeasonGames: 40, level: 5, country: "Australia" },
+  SAB: { name: "Serie A Baseball", teams: 18, regularSeasonGames: 30, level: 5, country: "Italy" },
+  HHK: { name: "Honkbal Hoofdklasse", teams: 8, regularSeasonGames: 28, level: 5, country: "Netherlands" },
+  SNB: { name: "Serie Nacional de Béisbol", teams: 16, regularSeasonGames: 75, level: 5, country: "Cuba" },
   MINORS: { name: "Minor League Baseball", teams: 0, regularSeasonGames: 138, level: 0, country: "USA" }
 };
 
 // MINOR_LEVELS, MINOR_LEAGUES_BY_LEVEL, MINOR_LEVEL_CODE, and
 // MINOR_LEVEL_GAMES live in data/minor-leagues.js (loaded before this file).
 
-const ALL_PRO_TEAMS = [...MLB_TEAMS, ...NPB_TEAMS, ...KBO_TEAMS];
+const PRO_LEAGUE_CODES = ["MLB", "NPB", "KBO", "LMB", "LPB", "CPBL", "LBPRC", "CPB", "DBL", "NBL", "ABL", "SAB", "HHK", "SNB"];
+const ALL_PRO_TEAMS = [
+  ...MLB_TEAMS, ...NPB_TEAMS, ...KBO_TEAMS,
+  ...LMB_TEAMS, ...LPB_TEAMS, ...CPBL_TEAMS, ...LBPRC_TEAMS,
+  ...CPB_TEAMS, ...DBL_TEAMS, ...NBL_TEAMS,
+  ...ABL_TEAMS, ...ITA_TEAMS, ...HOOFDKLASSE_TEAMS, ...CUBA_TEAMS
+];
 
 // ============================================================
 // MINOR LEAGUE AFFILIATE TEAMS

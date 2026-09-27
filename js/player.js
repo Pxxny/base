@@ -53,7 +53,7 @@ function createPlayer({ name, age, nationality, position, isUser = false, levelH
     health: { status: "Healthy", injury: null, daysOut: 0 },
     contract: null,
     teamId: null,
-    level: "Amateur", // Amateur, HS, College, Rookie, Single-A, High-A, Double-A, Triple-A, MLB, NPB, KBO
+    level: "Amateur", // Amateur, HS, College, Rookie, Single-A, High-A, Double-A, Triple-A, MLB, NPB, KBO, LMB, LPB, CPBL, LBPRC, CPB, DBL, NBL
     yearsPro: 0,
     retired: false,
     careerStats: emptyCareerStats(),

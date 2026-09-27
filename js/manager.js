@@ -12,24 +12,24 @@ const MANAGER_ROLES = {
 };
 
 function ensureManagerState(state) {
-  state.manager ||= {
-    active: false,
-    role: null,
-    teamId: null,
-    experienceYears: 0,
-    experienceDays: 0,
-    reputation: 35,
-    strategy: "Balanced",
-    lineupIds: [],
-    lineupPositions: {},
-    draftBoard: [],
-    prospectPool: [],
-    transactions: [],
-    awards: [],
-    fired: false,
-    jobHistory: []
+  if (!state) return null;
+  state.manager ||= {};
+  const m = state.manager;
+  const defaults = {
+    active: false, role: null, teamId: null, experienceYears: 0, experienceDays: 0,
+    reputation: 35, strategy: "Balanced", lineupIds: [], lineupPositions: {},
+    draftBoard: [], prospectPool: [], transactions: [], awards: [], fired: false,
+    jobHistory: [], jobOffer: null
   };
-  return state.manager;
+  for (const [key, value] of Object.entries(defaults)) if (m[key] == null) m[key] = value;
+  if (!Array.isArray(m.lineupIds)) m.lineupIds = [];
+  if (!m.lineupPositions || typeof m.lineupPositions !== "object") m.lineupPositions = {};
+  if (!Array.isArray(m.draftBoard)) m.draftBoard = [];
+  if (!Array.isArray(m.prospectPool)) m.prospectPool = [];
+  if (!Array.isArray(m.transactions)) m.transactions = [];
+  if (!Array.isArray(m.awards)) m.awards = [];
+  if (!Array.isArray(m.jobHistory)) m.jobHistory = [];
+  return m;
 }
 
 function managerExperienceEligibility(state) {
@@ -53,9 +53,11 @@ function enterCoachingCareer(state, teamId, role = "Assistant Coach") {
     toast("You need more playing experience before joining a coaching staff.");
     return false;
   }
-  const team = state.teams[teamId];
-  if (!team) return false;
+  const team = state.teams?.[teamId] || (state.allTeams || []).find(t => t.id === teamId);
+  if (!team) { toast("That team is no longer available."); return false; }
   const m = state.manager;
+  state.teams ||= {};
+  state.teams[team.id] ||= team;
   m.active = true;
   m.role = role;
   m.teamId = teamId;
@@ -72,25 +74,30 @@ function enterCoachingCareer(state, teamId, role = "Assistant Coach") {
 }
 
 function seedManagerLineup(state, team) {
-  const eligible = (team.roster || []).filter(p => !isPitcher(p.position) && p.health?.status === "Healthy");
+  const eligible = (team.roster || []).filter(p => !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy");
   eligible.sort((a,b) => battingOverall(b)-battingOverall(a));
   const chosen = eligible.slice(0, 9);
   state.manager.lineupIds = chosen.map(p => p.id);
   state.manager.lineupPositions = {};
-  chosen.forEach((p, i) => state.manager.lineupPositions[p.id] = p.position || ["C","1B","2B","3B","SS","LF","CF","RF","DH"][i]);
+  const assigned = typeof assignFieldPositions === "function" ? assignFieldPositions(chosen) : chosen.map((p,i)=>({player:p,position:p.position||["C","1B","2B","3B","SS","LF","CF","RF","DH"][i]}));
+  assigned.forEach(slot => state.manager.lineupPositions[slot.player.id] = slot.position);
 }
 
 function managerLineupForTeam(team) {
-  const m = STATE?.manager;
-  if (!m?.active || m.role !== "Manager" || m.teamId !== team.id) return null;
-  const players = m.lineupIds.map(id => (team.roster || []).find(p => p.id === id)).filter(Boolean);
-  const healthy = players.filter(p => !isPitcher(p.position) && p.health?.status === "Healthy");
-  if (healthy.length < 9) return null;
-  const order = healthy.slice(0,9).map((p,i) => ({
-    player:p,
-    position:m.lineupPositions?.[p.id] || p.position,
-    battingOrder:i+1
-  }));
+  const m = ensureManagerState(STATE);
+  if (!m?.active || m.role !== "Manager" || m.teamId !== team?.id) return null;
+  let players = (m.lineupIds || []).map(id => (team.roster || []).find(p => p.id === id)).filter(Boolean);
+  players = players.filter(p => !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy");
+  if (players.length < 9) {
+    seedManagerLineup(STATE, team);
+    players = (m.lineupIds || []).map(id => (team.roster || []).find(p => p.id === id)).filter(p => p && !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy");
+  }
+  if (players.length < 9) return null;
+  const selected = players.slice(0, 9);
+  const order = typeof assignFieldPositions === "function"
+    ? assignFieldPositions(selected).map(slot => ({ ...slot }))
+    : selected.map((p, i) => ({ player:p, position:m.lineupPositions?.[p.id] || p.position, battingOrder:i+1 }));
+  order.forEach((slot, i) => { slot.battingOrder = i + 1; m.lineupPositions[slot.player.id] = slot.position; });
   return { coach: { name: stateManagerName(), personality: "Player Manager", trustInUser: 100 }, order };
 }
 function stateManagerName() { return STATE?.player?.name || "Player Manager"; }
@@ -99,10 +106,12 @@ function managerSetLineup(state, ids) {
   const m = ensureManagerState(state);
   const team = state.teams[m.teamId];
   if (!team || m.role !== "Manager") return false;
-  const valid = ids.map(id => team.roster.find(p=>p.id===id)).filter(p => p && !isPitcher(p.position) && p.health?.status === "Healthy");
-  if (valid.length !== 9) { toast("A legal lineup needs 9 healthy position players."); return false; }
+  const uniqueIds = [...new Set(ids)];
+  const valid = uniqueIds.map(id => team.roster.find(p=>p.id===id)).filter(p => p && !isPitcher(p.position) && (p.health?.status || "Healthy") === "Healthy");
+  if (valid.length !== 9) { toast("A legal lineup needs exactly 9 healthy position players."); return false; }
+  const assigned = typeof assignFieldPositions === "function" ? assignFieldPositions(valid) : valid.map((p,i)=>({player:p,position:p.position}));
   m.lineupIds = valid.map(p=>p.id);
-  valid.forEach((p,i)=> { m.lineupPositions[p.id] = p.position; });
+  assigned.forEach(slot => { m.lineupPositions[slot.player.id] = slot.position; });
   toast("Starting lineup saved.");
   renderAll();
   return true;
@@ -182,8 +191,10 @@ function managerDailyUpdate(state){
     m.reputation=clamp(m.reputation+3,0,100);
     // Assistant Coach -> Bench Coach happens automatically after roughly
     // 1-2 seasons on staff (per the career path spec), not a manual click.
-    if(m.role==="Assistant Coach" && m.experienceYears>=rnd(1,2)){
+    if(m.role==="Assistant Coach" && m.experienceYears>=1){
       m.role="Bench Coach";
+      const staffTeam = state.teams?.[m.teamId];
+      if (staffTeam) staffTeam.manager = { ...(staffTeam.manager || {}), name: stateManagerName(), role: "Bench Coach", reputation: m.reputation };
       addNews(state, `${stateManagerName()} is promoted to Bench Coach after ${m.experienceYears} season(s) on staff.`);
     }
     if(m.role!=="Manager" && m.experienceYears>=2){
@@ -198,11 +209,33 @@ function managerJobOffer(state){
   if(m.role!=="Assistant Coach" && m.role!=="Bench Coach") return;
   const elig=managerExperienceEligibility(state);
   if(!elig.manager || m.reputation<45) return;
-  const candidates=state.allTeams.filter(t=>t.league && t.league!=="MINORS" && t.id!==m.teamId);
+  const candidates=(state.allTeams || []).filter(t=>t.league && t.league!=="MINORS" && t.id!==m.teamId && t.roster?.length);
   if(!candidates.length) return;
   const team=pick(candidates);
   m.jobOffer={teamId:team.id,teamName:team.name,role:"Manager"};
   addNews(state, `${team.name} has interviewed ${state.player?.name || "the coach"} for its manager vacancy.`);
+}
+
+function acceptManagerJob(state) {
+  const m = ensureManagerState(state);
+  const offer = m.jobOffer;
+  if (!offer) return false;
+  const newTeam = state.teams?.[offer.teamId] || (state.allTeams || []).find(t => t.id === offer.teamId);
+  if (!newTeam) { m.jobOffer = null; toast("That manager vacancy is no longer available."); renderAll(); return false; }
+  const oldTeam = state.teams?.[m.teamId];
+  if (oldTeam?.manager?.name === stateManagerName()) oldTeam.manager = { ...(oldTeam.manager || {}), role: "Vacant" };
+  state.teams ||= {}; state.teams[newTeam.id] ||= newTeam;
+  m.active = true; m.role = "Manager"; m.teamId = newTeam.id; m.jobOffer = null; m.fired = false;
+  m.jobHistory ||= [];
+  m.jobHistory.unshift({ year: state.year, day: state.day, teamId: newTeam.id, teamName: newTeam.name, role: "Manager" });
+  m.jobHistory = m.jobHistory.slice(0, 20);
+  newTeam.manager = { name: stateManagerName(), role: "Manager", reputation: m.reputation };
+  seedManagerLineup(state, newTeam);
+  addNews(state, `${stateManagerName()} is hired as manager of ${newTeam.name}.`);
+  toast(`Hired as manager of ${newTeam.name}.`);
+  ACTIVE_TAB = "manager";
+  renderAll();
+  return true;
 }
 
 function renderManagerView(){
@@ -240,7 +273,7 @@ function renderManagerView(){
     } else {
       card.appendChild(el("p",{},`Keep building reputation as Bench Coach. After enough coaching experience, other teams may offer you a Manager job.`));
     }
-    if(m.jobOffer) card.appendChild(el("button",{class:"btn amber",onclick:()=>{m.role="Manager";m.teamId=m.jobOffer.teamId;m.jobOffer=null;STATE.teams[m.teamId].manager={name:stateManagerName(),role:"Manager",reputation:m.reputation};seedManagerLineup(STATE,STATE.teams[m.teamId]);addNews(STATE,`${stateManagerName()} is hired as manager of ${STATE.teams[m.teamId].name}.`);renderAll();}},`Accept ${m.jobOffer.teamName} Manager Job`));
+    if(m.jobOffer) card.appendChild(el("button",{class:"btn amber",onclick:()=>acceptManagerJob(STATE)},`Accept ${m.jobOffer.teamName} Manager Job`));
     wrap.appendChild(card); return wrap;
   }
 

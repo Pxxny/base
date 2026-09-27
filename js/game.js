@@ -9,6 +9,7 @@
 let STATE = null;
 let ACTIVE_TAB = "career";
 let LAST_GAME_LOGS = [];
+let CORE_LAST_DAY_KEY = null;
 let CREATION = { name: "", age: 17, nationality: "USA", position: "SS", battingHand: "Right", throwingHand: "Right", height: 72, weight: 190 };
 
 const TABS = [
@@ -23,7 +24,8 @@ const TABS = [
   { id: "contracts", label: "CONTRACT" },
   { id: "awards", label: "AWARDS" },
   { id: "news", label: "NEWS" },
-  { id: "save", label: "SAVE/LOAD" }
+  { id: "save", label: "SAVE/LOAD" },
+  { id: "systems", label: "SYSTEMS" }
 ];
 
 function el(tag, attrs = {}, children = []) {
@@ -85,6 +87,15 @@ function renderTopRight() {
 
 function renderAll() {
   try {
+    if (typeof ensureCoreSystems === "function") {
+      ensureCoreSystems(STATE);
+      const coreDayKey = STATE ? `${STATE.year}-${STATE.day}-${STATE.player?.teamId || "none"}` : "none";
+      if (CORE_LAST_DAY_KEY !== coreDayKey) {
+        CORE_LAST_DAY_KEY = coreDayKey;
+        if (STATE?.player) { coreUpdateMorale(); coreUpdateTeamChemistry(); coreGenerateWeather(); coreCheckMilestones(); }
+      }
+      coreMarkDirty();
+    }
     renderTicker();
     renderTabs();
     renderTopRight();

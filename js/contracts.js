@@ -5,7 +5,7 @@
 
 function estimateSalary(p, level) {
   const ov = overallRating(p);
-  const levelMult = { Amateur: 0, HS: 0, College: 0, Rookie: 0.01, "Single-A": 0.012, "High-A": 0.015, "Double-A": 0.02, "Triple-A": 0.03, MLB: 1, NPB: 0.6, KBO: 0.4 }[level] ?? 0.05;
+  const levelMult = { Amateur: 0, HS: 0, College: 0, Rookie: 0.01, "Single-A": 0.012, "High-A": 0.015, "Double-A": 0.02, "Triple-A": 0.03, MLB: 1, NPB: 0.6, KBO: 0.4, LMB: 0.35, LPB: 0.25, CPBL: 0.35, LBPRC: 0.3, CPB: 0.2, DBL: 0.25, NBL: 0.2 }[level] ?? 0.05;
   const base = Math.max(0.4, (ov - 40) * 0.35);
   return Math.round(base * levelMult * 100) / 100; // millions
 }
@@ -14,7 +14,7 @@ function generateContract(p, level, years = null) {
   const salary = estimateSalary(p, level);
   const length = years || rnd(1, 4);
   return {
-    level, salary, years: length, yearSigned: null, type: level === "MLB" || level === "NPB" || level === "KBO" ? "Pro Contract" : "Minor League Contract",
+    level, salary, years: length, yearSigned: null, type: PRO_LEAGUE_CODES.includes(level) ? "Pro Contract" : "Minor League Contract",
     bonus: Math.round(salary * rnd(5, 20)) / 100
   };
 }
@@ -39,6 +39,6 @@ function renderContractView() {
     ]));
   }
   card.appendChild(el("h3", { style: "margin-top:18px;" }, "Estimated Market Value"));
-  card.appendChild(el("p", {}, `Based on current performance (OVR ${overallRating(p)}), your estimated market value is roughly $${estimateSalary(p, p.level === "MLB" || p.level === "NPB" || p.level === "KBO" ? p.level : "Triple-A")}M/year.`));
+  card.appendChild(el("p", {}, `Based on current performance (OVR ${overallRating(p)}), your estimated market value is roughly $${estimateSalary(p, PRO_LEAGUE_CODES.includes(p.level) ? p.level : "Triple-A")}M/year.`));
   return card;
 }
