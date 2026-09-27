@@ -141,6 +141,41 @@ function renderEnhancedFieldDiagram(currentHalf, currentPA, result, gv) {
     svg.appendChild(bat);
   }
 
+  // Contact animation: once the PA resolves, show the ball leaving the bat
+  // and runners actually moving around the bases. This is intentionally
+  // lightweight SVG animation so it remains smooth on iPad/mobile.
+  if (outcomePhase && ["1B","2B","3B","HR"].includes(currentPA.result)) {
+    const ball = fieldCreateSvg("circle", { cx: 326, cy: 418, r: 5, class: "field-hit-ball" });
+    const ballPath = fieldCreateSvg("path", { d: currentPA.result === "HR" ? "M326 418 Q390 260 300 55" : currentPA.result === "2B" ? "M326 418 Q430 350 510 190" : currentPA.result === "3B" ? "M326 418 Q235 330 85 170" : "M326 418 Q365 330 430 300", class: "field-motion-path" });
+    const motion = fieldCreateSvg("animateMotion", { dur: "0.75s", fill: "freeze", path: ballPath.getAttribute("d") });
+    ball.appendChild(motion);
+    svg.appendChild(ball);
+
+    const runFromTo = (from, to, cls) => {
+      const f = FIELD_BASES[from], t = FIELD_BASES[to];
+      if (!f || !t) return;
+      const runner = fieldCreateSvg("circle", { cx: f.x, cy: f.y, r: 7, class: `field-runner-moving ${cls || ""}` });
+      const path = `M${f.x} ${f.y} L${t.x} ${t.y}`;
+      runner.appendChild(fieldCreateSvg("animateMotion", { dur: "0.8s", begin: "0.05s", fill: "freeze", path }));
+      svg.appendChild(runner);
+    };
+    const beforeBases = sameHalfPrev?.basesAfter || [null, null, null];
+    if (beforeBases[2]) runFromTo(3, 0, "runner-score");
+    if (beforeBases[1]) runFromTo(2, 3, "runner-advance");
+    if (beforeBases[0]) runFromTo(1, 2, "runner-advance");
+    if (currentPA.result === "HR") {
+      runFromTo(1, 0, "runner-score");
+      runFromTo(2, 0, "runner-score");
+      runFromTo(3, 0, "runner-score");
+    } else {
+      const target = currentPA.result === "2B" ? 2 : currentPA.result === "3B" ? 3 : 1;
+      const f = FIELD_BASES[0], t = FIELD_BASES[target];
+      const batterRun = fieldCreateSvg("circle", { cx: f.x, cy: f.y, r: 8, class: "field-runner-moving batter-running" });
+      batterRun.appendChild(fieldCreateSvg("animateMotion", { dur: "0.9s", fill: "freeze", path: `M${f.x} ${f.y} L${t.x} ${t.y}` }));
+      svg.appendChild(batterRun);
+    }
+  }
+
   box.appendChild(svg);
 
   const info = el("div", { class: "real-field-info" });
