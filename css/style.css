@@ -323,3 +323,79 @@ footer { text-align: center; padding: 20px; color: var(--chalk-dim); font-family
 @media (prefers-reduced-motion: reduce) {
   .pitch-ball.throwing, .bat-swing.swinging, .pitcher-wind, .pa-outcome-flash.show { animation: none !important; opacity: 1 !important; }
 }
+
+/* Pitch calling controls */
+.pitch-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pitch-choice {
+  font-size: 11px;
+  padding: 7px 9px;
+}
+.pitch-choice.selected {
+  border-color: var(--amber);
+  color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber-dim);
+}
+
+/* ============================================================
+   REALISTIC LIVE FIELD
+   ============================================================ */
+.real-field-wrap {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(230px, 300px);
+  gap: 16px;
+  align-items: center;
+}
+.real-field { width: 100%; min-height: 300px; overflow: visible; }
+.field-grass { fill: #173c28; stroke: #355c42; stroke-width: 2; }
+.field-warning { fill: none; stroke: #5b6645; stroke-width: 18; opacity: .55; }
+.field-dirt { fill: #70462e; opacity: .95; }
+.field-infield { fill: #805034; opacity: .9; }
+.foul-line { stroke: #e8e3d3; stroke-width: 2; opacity: .8; }
+.field-base { fill: #eee7d5; stroke: #30271f; stroke-width: 2; }
+.field-base.occupied { fill: var(--amber); stroke: #fff0c5; }
+.field-base-label { fill: #2b241d; font: 700 11px var(--font-mono); text-anchor: middle; }
+.runner-dot { fill: var(--chalk); stroke: var(--amber); stroke-width: 2; animation: runnerPulse 1s ease-in-out infinite; }
+.field-player-dot { fill: #17304a; stroke: #d9d5c8; stroke-width: 2; }
+.field-pitcher-dot { fill: #3b5369; stroke: var(--amber); stroke-width: 2; }
+.batter-dot-real { fill: var(--clay-bright); stroke: #f1d0b4; stroke-width: 2; }
+.field-player-initial { fill: #f2eee2; font: 700 9px var(--font-mono); text-anchor: middle; pointer-events: none; }
+.field-player-label { fill: #d0cbbd; font: 700 9px var(--font-mono); text-anchor: middle; pointer-events: none; }
+.field-player-throwing { animation: pitcherDelivery .55s ease-in-out; transform-origin: 300px 315px; }
+.real-pitch-ball { fill: #fffdf2; animation: realPitchTravel .55s cubic-bezier(.25,.7,.2,1) forwards; }
+.real-bat-swing { stroke: #eee7d5; stroke-width: 6; stroke-linecap: round; transform-origin: 327px 418px; animation: realBatSwing .45s ease-out forwards; }
+.batter-ready { animation: batterLoad .45s ease-in-out; transform-origin: 326px 418px; }
+.real-field-info { min-width: 0; }
+.real-field-header { display:flex; justify-content:space-between; gap:10px; align-items:baseline; border-bottom:1px solid var(--line); padding-bottom:8px; }
+.real-field-header span { color: var(--chalk-dim); font: 11px var(--font-mono); text-align:right; }
+.field-matchup { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0; }
+.field-matchup > div { background: rgba(0,0,0,.12); padding:9px; border-radius:6px; min-width:0; }
+.field-matchup strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; }
+.field-live-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+.pitch-call-card { margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+.field-result-banner { margin-top:12px; padding:10px; text-align:center; font-family:var(--font-display); letter-spacing:1px; border:1px solid var(--line); border-radius:7px; animation: resultPop .65s ease-out; }
+.field-result-banner.hr { color: var(--amber); }
+.field-result-banner.hit { color: var(--green-ok); }
+.field-result-banner.bb { color: var(--chalk); }
+.field-result-banner.out { color: var(--chalk-dim); }
+@keyframes realPitchTravel { 0% { transform: translate(0,0) scale(1); opacity:1; } 100% { transform: translate(0,103px) scale(.55); opacity:.15; } }
+@keyframes realBatSwing { 0% { transform: rotate(-65deg); opacity:0; } 30% { opacity:1; } 100% { transform: rotate(25deg); opacity:0; } }
+@keyframes pitcherDelivery { 0% { transform: translateY(0) rotate(0deg); } 40% { transform: translateY(-5px) rotate(-2deg); } 75% { transform: translateY(3px) rotate(2deg); } 100% { transform: translateY(0) rotate(0deg); } }
+@keyframes batterLoad { 0% { transform: translateX(0); } 45% { transform: translateX(-4px); } 100% { transform: translateX(0); } }
+@keyframes runnerPulse { 0%,100% { opacity:.75; } 50% { opacity:1; transform:scale(1.12); } }
+@keyframes resultPop { 0% { opacity:0; transform:scale(.92); } 35% { opacity:1; transform:scale(1.03); } 100% { opacity:1; transform:scale(1); } }
+@media (max-width: 760px) {
+  .real-field-wrap { grid-template-columns: 1fr; }
+  .real-field { min-height: 250px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .field-player-throwing, .real-pitch-ball, .real-bat-swing, .batter-ready, .runner-dot, .field-result-banner { animation: none !important; }
+}
